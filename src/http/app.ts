@@ -1,4 +1,4 @@
-import express, { type Request, type Response } from "express";
+import express, { type NextFunction, type Request, type Response } from "express";
 
 import type { Settings } from "../config/settings.js";
 import {
@@ -8,7 +8,10 @@ import {
 } from "../github/events.js";
 import { verifyGitHubSignature } from "../github/signature.js";
 import { DeterministicReviewer, type PullRequestDiff } from "../review/reviewer.js";
-import { InMemoryReviewEventStore, type ReviewEventStore } from "../storage/eventStore.js";
+import {
+  createPostgresReviewEventStore,
+  type ReviewEventStore,
+} from "../storage/eventStore.js";
 
 type CreateAppOptions = {
   settings: Settings;
@@ -21,7 +24,7 @@ type RawBodyRequest = Request & {
 };
 
 export function createApp(options: CreateAppOptions) {
-  const store = options.store ?? new InMemoryReviewEventStore();
+  const store = options.store ?? createPostgresReviewEventStore(options.settings.databaseUrl);
   const reviewer = options.reviewer ?? new DeterministicReviewer();
   const app = express();
 
@@ -33,15 +36,16 @@ export function createApp(options: CreateAppOptions) {
     }),
   );
 
-  app.get("/health", (_request: Request, response: Response) => {
+  app.get("/health", asyncHandler(async (_request: Request, response: Response) => {
+    const storedEvents = await store.count();
     response.json({
       status: "ok",
       environment: options.settings.appEnv,
-      storedEvents: store.count(),
+      storedEvents,
     });
-  });
+  }));
 
-  app.post("/webhooks/github", (request: RawBodyRequest, response: Response) => {
+  app.post("/webhooks/github", asyncHandler(async (request: RawBodyRequest, response: Response) => {
     const eventType = request.header("x-github-event");
     const deliveryId = request.header("x-github-delivery");
     const signature = request.header("x-hub-signature-256");
@@ -66,7 +70,7 @@ export function createApp(options: CreateAppOptions) {
 
     const event = normalizePullRequestEvent(deliveryId, parsed.data);
     const review = reviewer.review(event, extractDiff(parsed.data));
-    const saved = store.save(event, review);
+    const saved = await store.save(event, review);
 
     return response.status(saved.stored ? 202 : 200).json({
       accepted: true,
@@ -74,6 +78,12 @@ export function createApp(options: CreateAppOptions) {
       deliveryId,
       review: saved.record.review,
     });
+  }));
+
+  app.use((error: unknown, _request: Request, response: Response, next: NextFunction) => {
+    void next;
+    console.error(error);
+    response.status(500).json({ error: "internal server error" });
   });
 
   return app;
@@ -88,5 +98,13 @@ function extractDiff(payload: PullRequestWebhook): PullRequestDiff {
         patch: body,
       },
     ],
+  };
+}
+
+function asyncHandler(
+  handler: (request: RawBodyRequest, response: Response, next: NextFunction) => Promise<unknown>,
+) {
+  return (request: RawBodyRequest, response: Response, next: NextFunction) => {
+    handler(request, response, next).catch(next);
   };
 }

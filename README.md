@@ -2,7 +2,7 @@
 
 GitHub webhook service for automated pull request triage. It verifies signed GitHub webhook deliveries, normalizes pull request events, stores deliveries idempotently, and returns deterministic review findings that flag risky change patterns.
 
-This project is built as a developer productivity portfolio piece. It demonstrates the backend foundation for a code review agent before layering in GitHub App publishing, queues, persistent storage, and LLM review providers.
+This project is built as a developer productivity portfolio piece. It demonstrates the backend foundation for a code review agent before layering in GitHub App publishing, queues, comment publishing, and LLM review providers.
 
 ## Why This Exists
 
@@ -25,14 +25,14 @@ flowchart LR
     API --> Signature[x-hub-signature-256 Verification]
     Signature --> Validate[Zod Payload Validation]
     Validate --> Normalize[Normalized Review Event]
-    Normalize --> Store[In-Memory Event Store]
+    Normalize --> Store[PostgreSQL Review Event Store]
     Normalize --> Reviewer[Deterministic Reviewer]
     Reviewer --> Findings[Risk Level + Findings]
     Store --> Response[Accepted / Duplicate Response]
     Findings --> Response
 ```
 
-The first implementation keeps storage in memory and review execution inline so local development and CI stay dependency-free. The system design intentionally leaves clean extension points for PostgreSQL persistence, BullMQ workers, GitHub App authentication, diff retrieval, and LLM-assisted review.
+The service stores normalized review events and deterministic findings in PostgreSQL with GitHub delivery IDs as the idempotency key. Review execution is still inline so the current webhook path remains easy to inspect, while the design leaves clean extension points for BullMQ workers, GitHub App authentication, diff retrieval, and LLM-assisted review.
 
 ## What Reviewers Should Notice
 
@@ -42,6 +42,7 @@ The first implementation keeps storage in memory and review execution inline so 
 - Zod schema validation for pull request webhook payloads.
 - Normalized internal event model separate from GitHub's raw payload shape.
 - Idempotent event store keyed by GitHub delivery ID.
+- PostgreSQL-backed review event persistence with a SQL migration.
 - Deterministic reviewer with explicit findings, severity, recommendations, and risk levels.
 - Tests covering signature verification, webhook behavior, duplicate handling, health checks, and reviewer rules.
 - Lint, typecheck, and test scripts ready for CI.
@@ -52,12 +53,13 @@ The first implementation keeps storage in memory and review execution inline so 
 - `POST /webhooks/github` accepts signed GitHub `pull_request` events.
 - Unsupported signed GitHub event types return `202` without processing.
 - Duplicate delivery IDs return the original review result without creating another stored event.
+- Review events persist repository, PR number, action, head SHA, risk level, full normalized event JSON, review findings JSON, and timestamps.
 - Review rules flag:
   - large change sets
   - missing test changes
   - debug or placeholder markers
   - secret-handling patterns
-- Docker Compose includes PostgreSQL and Redis for the planned persistent/queued path.
+- Docker Compose includes PostgreSQL and Redis for the persistent/queued path.
 
 ## Tech Stack
 
@@ -68,7 +70,7 @@ The first implementation keeps storage in memory and review execution inline so 
 - Vitest
 - Supertest
 - ESLint
-- PostgreSQL planned
+- PostgreSQL
 - Redis/BullMQ planned
 - GitHub Actions
 
@@ -78,11 +80,12 @@ The first implementation keeps storage in memory and review execution inline so 
 src/http/             Express app and webhook route wiring
 src/github/           GitHub signature verification and event normalization
 src/review/           Deterministic review provider and finding model
-src/storage/          Review event store interface and in-memory implementation
+migrations/           SQL schema for persisted review events
+src/storage/          Review event store interface, PostgreSQL, and in-memory implementations
 src/config/           Environment-driven settings
 tests/                Unit and API tests
 docs/                 System design and production tradeoffs
-docker-compose.yml    Local PostgreSQL and Redis services for future persistence work
+docker-compose.yml    Local PostgreSQL and Redis services
 ```
 
 ## Local Setup
@@ -113,10 +116,16 @@ Health check:
 curl http://localhost:8080/health
 ```
 
-Start local infrastructure for future persistence/queue work:
+Start local infrastructure:
 
 ```bash
 docker compose up -d
+```
+
+Apply the current schema migration:
+
+```bash
+psql "$DATABASE_URL" -f migrations/20260703_0001_create_review_events.sql
 ```
 
 ## Demo Flow
@@ -159,7 +168,7 @@ Expected behavior:
 | `APP_ENV` | Runtime environment label | `local` |
 | `PORT` | HTTP port | `8080` |
 | `GITHUB_WEBHOOK_SECRET` | Shared secret for GitHub webhook HMAC verification | `replace-with-local-secret` |
-| `DATABASE_URL` | Reserved PostgreSQL connection string for the persistent event store | `postgresql://...` |
+| `DATABASE_URL` | PostgreSQL connection string for the persistent event store | `postgresql://...` |
 | `REDIS_URL` | Reserved Redis connection string for queued review jobs | `redis://localhost:6379/0` |
 | `LLM_PROVIDER` | Reserved review provider selector | `mock` |
 
@@ -178,13 +187,13 @@ More detail is available in [docs/system-design.md](docs/system-design.md).
 Key tradeoffs:
 
 - Deterministic rules are less flexible than LLM review, but they make behavior auditable and reproducible.
-- In-memory storage keeps the first slice simple and testable; PostgreSQL is required for real deployments.
+- The store interface keeps webhook logic independent from PostgreSQL details; tests can use an isolated in-memory PostgreSQL adapter.
 - Inline review makes local webhook behavior easy to inspect; production review work should move into a queue.
 - The current route uses pull request metadata and PR body text as a stand-in for diff content. A GitHub App integration should fetch file patches and publish/update review comments idempotently.
 
 ## Future Improvements
 
-- Add PostgreSQL-backed event storage and migrations.
+- Add a migration runner so schema changes do not rely on manual `psql` execution.
 - Add Redis/BullMQ review jobs with retries and dead-letter handling.
 - Add GitHub App installation authentication.
 - Retrieve pull request file diffs from GitHub.

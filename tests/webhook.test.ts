@@ -27,7 +27,7 @@ describe("GitHub webhook endpoint", () => {
     expect(first.body.review.riskLevel).toBe("high");
     expect(second.statusCode).toBe(200);
     expect(second.body.duplicate).toBe(true);
-    expect(store.count()).toBe(1);
+    await expect(store.count()).resolves.toBe(1);
   });
 
   it("rejects invalid signatures", async () => {
@@ -45,7 +45,7 @@ describe("GitHub webhook endpoint", () => {
   });
 
   it("returns health with stored event count", async () => {
-    const app = createApp({ settings });
+    const app = createApp({ settings, store: new InMemoryReviewEventStore() });
 
     const response = await request(app).get("/health");
 
