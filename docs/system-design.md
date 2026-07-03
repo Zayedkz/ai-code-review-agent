@@ -33,9 +33,12 @@
 
 ## 5. Data Model
 
+Current entity:
+
+- `review_events`: unique delivery ID, repository, repository URL, PR number, action, head SHA, risk level, normalized event JSON, review JSON, received timestamp, updated timestamp.
+
 Planned entities:
 
-- `review_events`: delivery ID, event type, repository, PR number, head SHA, action, payload metadata, timestamps.
 - `review_runs`: event ID, provider, status, risk level, attempt count, last error, timestamps.
 - `review_findings`: run ID, code, severity, message, recommendation, optional file path and line.
 - `published_comments`: run ID, GitHub comment ID, head SHA, body hash, timestamps.
@@ -44,7 +47,7 @@ Planned entities:
 
 Initial endpoints:
 
-- `GET /health`: service health and local event count.
+- `GET /health`: service health and persisted event count.
 - `POST /webhooks/github`: signed GitHub webhook intake for pull request events.
 
 Planned endpoints:
@@ -57,12 +60,12 @@ Planned endpoints:
 1. GitHub sends a pull request webhook.
 2. API verifies the raw body signature.
 3. API validates and normalizes the pull request payload.
-4. API stores the event idempotently by delivery ID.
-5. A review worker retrieves PR diff context from GitHub.
-6. Reviewer providers generate findings and a summary.
-7. Publisher writes a single idempotent PR summary comment.
+4. Deterministic reviewer providers generate findings and a summary.
+5. API stores the normalized event and review result idempotently by delivery ID.
+6. Future review workers retrieve PR diff context from GitHub for deeper analysis.
+7. Future publisher writes a single idempotent PR summary comment.
 
-The first implementation runs deterministic review inline and stores events in memory so local tests stay fast and dependency-free.
+The current implementation runs deterministic review inline and stores review events in PostgreSQL. Tests exercise the same store contract through an isolated in-memory PostgreSQL adapter, while route tests can still inject the in-memory implementation for dependency-free API behavior.
 
 ## 8. Scaling Strategy
 
@@ -100,11 +103,11 @@ The first implementation runs deterministic review inline and stores events in m
 - TypeScript/Express keeps the webhook surface straightforward and portfolio-readable; NestJS could help if the service grows significantly.
 - Deterministic rules are less capable than LLM review but make local behavior reproducible and testable.
 - Inline review is acceptable for the first slice; production review work should move to a queue.
-- In-memory storage keeps tests simple; PostgreSQL is required for real deployments.
+- PostgreSQL gives durable replay/audit behavior; the explicit store interface keeps local tests and future queue workers from depending on Express route internals.
 
 ## 13. Future Improvements
 
-- PostgreSQL persistence and migrations.
+- Migration runner for applying SQL migrations in deploy environments.
 - BullMQ worker and dead-letter queue.
 - GitHub App installation authentication.
 - Diff retrieval and file-level findings.
