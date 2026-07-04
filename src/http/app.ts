@@ -9,6 +9,7 @@ import {
 import { verifyGitHubSignature } from "../github/signature.js";
 import { DeterministicReviewer, type PullRequestDiff } from "../review/reviewer.js";
 import {
+  type StoredReviewEvent,
   createPostgresReviewEventStore,
   type ReviewEventStore,
 } from "../storage/eventStore.js";
@@ -43,6 +44,15 @@ export function createApp(options: CreateAppOptions) {
       environment: options.settings.appEnv,
       storedEvents,
     });
+  }));
+
+  app.get("/reviews/:deliveryId", asyncHandler(async (request: Request, response: Response) => {
+    const stored = await store.get(request.params.deliveryId);
+    if (!stored) {
+      return response.status(404).json({ error: "review delivery not found" });
+    }
+
+    return response.json(reviewAuditResponse(stored));
   }));
 
   app.post("/webhooks/github", asyncHandler(async (request: RawBodyRequest, response: Response) => {
@@ -87,6 +97,29 @@ export function createApp(options: CreateAppOptions) {
   });
 
   return app;
+}
+
+function reviewAuditResponse(stored: StoredReviewEvent) {
+  return {
+    deliveryId: stored.event.deliveryId,
+    status: "stored",
+    duplicateReplayBehavior: "duplicate deliveries return the originally stored review",
+    repository: stored.event.repository,
+    repositoryUrl: stored.event.repositoryUrl,
+    pullRequestNumber: stored.event.pullRequestNumber,
+    pullRequestTitle: stored.event.pullRequestTitle,
+    pullRequestUrl: stored.event.pullRequestUrl,
+    action: stored.event.action,
+    headSha: stored.event.headSha,
+    headRef: stored.event.headRef,
+    baseSha: stored.event.baseSha,
+    baseRef: stored.event.baseRef,
+    riskLevel: stored.review.riskLevel,
+    summary: stored.review.summary,
+    findings: stored.review.findings,
+    receivedAt: stored.receivedAt,
+    updatedAt: stored.updatedAt,
+  };
 }
 
 function extractDiff(payload: PullRequestWebhook): PullRequestDiff {

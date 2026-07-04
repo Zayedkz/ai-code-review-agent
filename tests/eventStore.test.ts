@@ -73,7 +73,7 @@ describe("PostgresReviewEventStore", () => {
 });
 
 describe("webhook persistence", () => {
-  it("persists webhook review events through the configured store", async () => {
+  it("persists webhook review events through the configured store and exposes audit retrieval", async () => {
     const store = await createMemoryBackedStore();
     const app = createApp({ settings, store });
     const payload = pullRequestPayload();
@@ -85,6 +85,23 @@ describe("webhook persistence", () => {
     expect(stored?.event.repository).toBe("Zayedkz/example");
     expect(stored?.event.headSha).toBe("abc123");
     expect(stored?.review.riskLevel).toBe("high");
+
+    const audit = await request(app).get("/reviews/delivery-webhook");
+    expect(audit.statusCode).toBe(200);
+    expect(audit.body).toMatchObject({
+      deliveryId: "delivery-webhook",
+      repository: "Zayedkz/example",
+      pullRequestNumber: 7,
+      action: "opened",
+      headSha: "abc123",
+      riskLevel: "high",
+      duplicateReplayBehavior: "duplicate deliveries return the originally stored review",
+    });
+    expect(audit.body.findings).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ code: "secret-handling-review", severity: "critical" }),
+      ]),
+    );
   });
 });
 

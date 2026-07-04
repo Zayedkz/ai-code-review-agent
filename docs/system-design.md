@@ -21,6 +21,7 @@
 - Accept pull request webhook events and ignore unsupported event types.
 - Deduplicate events by GitHub delivery ID.
 - Generate review findings from deterministic local rules.
+- Expose stored delivery audit details through a read-only endpoint.
 - Support future async processing with retry and dead-letter behavior.
 
 ## 4. Non-Functional Requirements
@@ -48,11 +49,11 @@ Planned entities:
 Initial endpoints:
 
 - `GET /health`: service health and persisted event count.
+- `GET /reviews/{deliveryId}`: inspect review event status, duplicate replay behavior, repository, PR number, action, head SHA, risk level, findings, and timestamps.
 - `POST /webhooks/github`: signed GitHub webhook intake for pull request events.
 
 Planned endpoints:
 
-- `GET /reviews/{deliveryId}`: inspect review event and generated findings.
 - `POST /reviews/{deliveryId}/retry`: retry a failed review run.
 
 ## 7. Processing Flow
@@ -67,6 +68,8 @@ Planned endpoints:
 
 The current implementation runs deterministic review inline and stores review events in PostgreSQL. Tests exercise the same store contract through an isolated in-memory PostgreSQL adapter, while route tests can still inject the in-memory implementation for dependency-free API behavior.
 
+Schema changes are applied with `npm run migrate`, which executes checked-in `migrations/*.sql` files in filename order using `DATABASE_URL`. The current migration creates the durable `review_events` audit table and supporting lookup indexes.
+
 ## 8. Scaling Strategy
 
 - Keep API replicas stateless.
@@ -80,6 +83,7 @@ The current implementation runs deterministic review inline and stores review ev
 - Return `401` for invalid webhook signatures.
 - Return `202` for unsupported but valid GitHub event types.
 - Treat duplicate delivery IDs as successful idempotent replays.
+- Return `404` for audit lookups when a delivery ID has not been stored.
 - Retry transient GitHub API and provider failures with bounded attempts.
 - Move terminal failures into a dead-letter state with last error context.
 
@@ -87,7 +91,8 @@ The current implementation runs deterministic review inline and stores review ev
 
 - Structured logs for delivery ID, repository, PR number, action, and result.
 - Metrics for webhook latency, queue depth, review latency, provider failures, and publish failures.
-- Audit trail for each review run and published comment.
+- Read-only audit lookup for stored review deliveries, including replay behavior and generated findings.
+- Future audit trail for each async review run and published comment.
 - Redacted traces across webhook, queue, GitHub API, and provider calls.
 
 ## 11. Security
@@ -107,7 +112,6 @@ The current implementation runs deterministic review inline and stores review ev
 
 ## 13. Future Improvements
 
-- Migration runner for applying SQL migrations in deploy environments.
 - BullMQ worker and dead-letter queue.
 - GitHub App installation authentication.
 - Diff retrieval and file-level findings.
