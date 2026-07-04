@@ -43,13 +43,16 @@ The service stores normalized review events and deterministic findings in Postgr
 - Normalized internal event model separate from GitHub's raw payload shape.
 - Idempotent event store keyed by GitHub delivery ID.
 - PostgreSQL-backed review event persistence with a SQL migration.
+- Migration runner for applying checked-in SQL migrations.
+- Read-only review audit endpoint for delivery lookup and duplicate replay inspection.
 - Deterministic reviewer with explicit findings, severity, recommendations, and risk levels.
-- Tests covering signature verification, webhook behavior, duplicate handling, health checks, and reviewer rules.
+- Tests covering signature verification, webhook behavior, duplicate handling, audit lookup, migration execution, health checks, and reviewer rules.
 - Lint, typecheck, and test scripts ready for CI.
 
 ## Features
 
 - `GET /health` returns service status, environment, and stored event count.
+- `GET /reviews/:deliveryId` returns read-only audit details for a stored delivery.
 - `POST /webhooks/github` accepts signed GitHub `pull_request` events.
 - Unsupported signed GitHub event types return `202` without processing.
 - Duplicate delivery IDs return the original review result without creating another stored event.
@@ -125,8 +128,10 @@ docker compose up -d
 Apply the current schema migration:
 
 ```bash
-psql "$DATABASE_URL" -f migrations/20260703_0001_create_review_events.sql
+npm run migrate
 ```
+
+The migration runner applies every `migrations/*.sql` file in filename order using the configured `DATABASE_URL`.
 
 ## Demo Flow
 
@@ -161,6 +166,14 @@ Expected behavior:
 - Reusing the same delivery ID returns `200` with `duplicate: true`.
 - Invalid signatures return `401`.
 
+Inspect a stored delivery:
+
+```bash
+curl http://localhost:8080/reviews/local-delivery-id
+```
+
+The audit response includes delivery status, duplicate replay behavior, repository, pull request number, action, head SHA, risk level, findings, and received/updated timestamps.
+
 ## Environment Variables
 
 | Variable | Purpose | Example |
@@ -193,10 +206,9 @@ Key tradeoffs:
 
 ## Future Improvements
 
-- Add a migration runner so schema changes do not rely on manual `psql` execution.
 - Add Redis/BullMQ review jobs with retries and dead-letter handling.
 - Add GitHub App installation authentication.
 - Retrieve pull request file diffs from GitHub.
 - Add an LLM provider behind the deterministic policy checks.
 - Publish or update a single PR review summary comment per delivery/head SHA.
-- Add an audit endpoint for review delivery status and findings.
+- Add retry and run-state audit details once async review jobs exist.
