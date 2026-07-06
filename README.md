@@ -1,6 +1,6 @@
 # AI Code Review Agent
 
-GitHub webhook service for automated pull request triage. It verifies signed GitHub webhook deliveries, normalizes pull request events, stores deliveries idempotently, and returns deterministic review findings that flag risky change patterns.
+GitHub webhook service for automated pull request triage. It verifies signed GitHub webhook deliveries, normalizes pull request events, fetches changed pull request files, stores deliveries idempotently, and returns deterministic review findings that flag risky change patterns.
 
 This project is built as a developer productivity portfolio piece. It demonstrates the backend foundation for a code review agent before layering in GitHub App publishing, queues, comment publishing, and LLM review providers.
 
@@ -12,6 +12,7 @@ This repo focuses on that foundation:
 
 - secure GitHub webhook verification
 - pull request payload validation and normalization
+- changed file and patch retrieval through a GitHub client boundary
 - idempotent delivery handling
 - deterministic review findings
 - testable provider boundaries
@@ -25,14 +26,15 @@ flowchart LR
     API --> Signature[x-hub-signature-256 Verification]
     Signature --> Validate[Zod Payload Validation]
     Validate --> Normalize[Normalized Review Event]
+    Normalize --> GitHubFiles[GitHub PR Files API]
+    GitHubFiles --> Reviewer[Deterministic Reviewer]
     Normalize --> Store[PostgreSQL Review Event Store]
-    Normalize --> Reviewer[Deterministic Reviewer]
     Reviewer --> Findings[Risk Level + Findings]
     Store --> Response[Accepted / Duplicate Response]
     Findings --> Response
 ```
 
-The service stores normalized review events and deterministic findings in PostgreSQL with GitHub delivery IDs as the idempotency key. Review execution is still inline so the current webhook path remains easy to inspect, while the design leaves clean extension points for BullMQ workers, GitHub App authentication, diff retrieval, and LLM-assisted review.
+The service stores normalized review events and deterministic findings in PostgreSQL with GitHub delivery IDs as the idempotency key. Review execution is still inline so the current webhook path remains easy to inspect, while the design leaves clean extension points for BullMQ workers, GitHub App authentication, comment publishing, and LLM-assisted review.
 
 ## What Reviewers Should Notice
 
@@ -41,6 +43,7 @@ The service stores normalized review events and deterministic findings in Postgr
 - `x-hub-signature-256` verification before payload processing.
 - Zod schema validation for pull request webhook payloads.
 - Normalized internal event model separate from GitHub's raw payload shape.
+- GitHub PR files client boundary that retrieves changed paths and patches without embedding credentials in source.
 - Idempotent event store keyed by GitHub delivery ID.
 - PostgreSQL-backed review event persistence with a SQL migration.
 - Migration runner for applying checked-in SQL migrations.
@@ -55,8 +58,11 @@ The service stores normalized review events and deterministic findings in Postgr
 - `GET /reviews/:deliveryId` returns read-only audit details for a stored delivery.
 - `POST /webhooks/github` accepts signed GitHub `pull_request` events.
 - Unsupported signed GitHub event types return `202` without processing.
-- Duplicate delivery IDs return the original review result without creating another stored event.
+- Duplicate delivery IDs return the original review result without creating another stored event or refetching GitHub diff data.
 - Review events persist repository, PR number, action, head SHA, risk level, full normalized event JSON, review findings JSON, and timestamps.
+- The webhook fetches changed pull request file paths and patches from GitHub before review.
+- If GitHub omits a patch for a large or binary file, the file path is still included with an empty patch.
+- If file retrieval fails or returns no files, review falls back to the pull request body so webhook intake remains resilient.
 - Review rules flag:
   - large change sets
   - missing test changes
@@ -81,7 +87,7 @@ The service stores normalized review events and deterministic findings in Postgr
 
 ```text
 src/http/             Express app and webhook route wiring
-src/github/           GitHub signature verification and event normalization
+src/github/           GitHub signature verification, event normalization, and PR file client
 src/review/           Deterministic review provider and finding model
 migrations/           SQL schema for persisted review events
 src/storage/          Review event store interface, PostgreSQL, and in-memory implementations
@@ -181,6 +187,8 @@ The audit response includes delivery status, duplicate replay behavior, reposito
 | `APP_ENV` | Runtime environment label | `local` |
 | `PORT` | HTTP port | `8080` |
 | `GITHUB_WEBHOOK_SECRET` | Shared secret for GitHub webhook HMAC verification | `replace-with-local-secret` |
+| `GITHUB_TOKEN` | GitHub App installation token or fine-grained token for reading pull request files; leave blank for public unauthenticated calls | `github_pat_...` |
+| `GITHUB_API_BASE_URL` | GitHub API base URL for GitHub.com or Enterprise Server | `https://api.github.com` |
 | `DATABASE_URL` | PostgreSQL connection string for the persistent event store | `postgresql://...` |
 | `REDIS_URL` | Reserved Redis connection string for queued review jobs | `redis://localhost:6379/0` |
 | `LLM_PROVIDER` | Reserved review provider selector | `mock` |
@@ -201,14 +209,14 @@ Key tradeoffs:
 
 - Deterministic rules are less flexible than LLM review, but they make behavior auditable and reproducible.
 - The store interface keeps webhook logic independent from PostgreSQL details; tests can use an isolated in-memory PostgreSQL adapter.
+- The GitHub file client is injectable, which keeps route tests deterministic and leaves room for GitHub App installation authentication.
 - Inline review makes local webhook behavior easy to inspect; production review work should move into a queue.
-- The current route uses pull request metadata and PR body text as a stand-in for diff content. A GitHub App integration should fetch file patches and publish/update review comments idempotently.
+- File retrieval falls back to the PR body when GitHub is unavailable, trading depth for reliable webhook acceptance.
 
 ## Future Improvements
 
 - Add Redis/BullMQ review jobs with retries and dead-letter handling.
-- Add GitHub App installation authentication.
-- Retrieve pull request file diffs from GitHub.
+- Add GitHub App installation authentication and scoped installation token minting.
 - Add an LLM provider behind the deterministic policy checks.
 - Publish or update a single PR review summary comment per delivery/head SHA.
 - Add retry and run-state audit details once async review jobs exist.
