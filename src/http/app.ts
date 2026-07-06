@@ -2,6 +2,10 @@ import express, { type NextFunction, type Request, type Response } from "express
 
 import type { Settings } from "../config/settings.js";
 import {
+  GitHubPullRequestFileClient,
+  type PullRequestFileClient,
+} from "../github/client.js";
+import {
   normalizePullRequestEvent,
   pullRequestWebhookSchema,
   type PullRequestWebhook,
@@ -18,6 +22,7 @@ type CreateAppOptions = {
   settings: Settings;
   store?: ReviewEventStore;
   reviewer?: DeterministicReviewer;
+  pullRequestFileClient?: PullRequestFileClient;
 };
 
 type RawBodyRequest = Request & {
@@ -27,6 +32,12 @@ type RawBodyRequest = Request & {
 export function createApp(options: CreateAppOptions) {
   const store = options.store ?? createPostgresReviewEventStore(options.settings.databaseUrl);
   const reviewer = options.reviewer ?? new DeterministicReviewer();
+  const pullRequestFileClient =
+    options.pullRequestFileClient ??
+    new GitHubPullRequestFileClient({
+      token: options.settings.githubToken,
+      apiBaseUrl: options.settings.githubApiBaseUrl,
+    });
   const app = express();
 
   app.use(
@@ -79,7 +90,18 @@ export function createApp(options: CreateAppOptions) {
     }
 
     const event = normalizePullRequestEvent(deliveryId, parsed.data);
-    const review = reviewer.review(event, extractDiff(parsed.data));
+    const existing = await store.get(deliveryId);
+    if (existing) {
+      return response.status(200).json({
+        accepted: true,
+        duplicate: true,
+        deliveryId,
+        review: existing.review,
+      });
+    }
+
+    const diff = await extractDiff(parsed.data, event, pullRequestFileClient);
+    const review = reviewer.review(event, diff);
     const saved = await store.save(event, review);
 
     return response.status(saved.stored ? 202 : 200).json({
@@ -122,7 +144,25 @@ function reviewAuditResponse(stored: StoredReviewEvent) {
   };
 }
 
-function extractDiff(payload: PullRequestWebhook): PullRequestDiff {
+async function extractDiff(
+  payload: PullRequestWebhook,
+  event: ReturnType<typeof normalizePullRequestEvent>,
+  pullRequestFileClient: PullRequestFileClient,
+): Promise<PullRequestDiff> {
+  try {
+    const diff = await pullRequestFileClient.fetchPullRequestDiff(event);
+    if (diff.files.length > 0) {
+      return diff;
+    }
+  } catch (error) {
+    console.warn("GitHub PR file retrieval failed; falling back to pull request body", {
+      deliveryId: event.deliveryId,
+      repository: event.repository,
+      pullRequestNumber: event.pullRequestNumber,
+      error: error instanceof Error ? error.message : "unknown error",
+    });
+  }
+
   const body = payload.pull_request.body ?? "";
   return {
     files: [

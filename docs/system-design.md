@@ -4,7 +4,8 @@
 
 - Receive GitHub pull request webhook events securely.
 - Normalize and persist review events idempotently.
-- Analyze pull request metadata and diffs for risk signals.
+- Retrieve changed pull request file paths and patches from GitHub.
+- Analyze pull request metadata and fetched diffs for risk signals.
 - Produce actionable summaries, findings, and recommendations.
 - Publish review output back to GitHub once GitHub App auth is connected.
 
@@ -20,6 +21,7 @@
 - Verify `x-hub-signature-256` using the configured webhook secret.
 - Accept pull request webhook events and ignore unsupported event types.
 - Deduplicate events by GitHub delivery ID.
+- Fetch changed file metadata and patches through a GitHub client boundary.
 - Generate review findings from deterministic local rules.
 - Expose stored delivery audit details through a read-only endpoint.
 - Support future async processing with retry and dead-letter behavior.
@@ -61,12 +63,13 @@ Planned endpoints:
 1. GitHub sends a pull request webhook.
 2. API verifies the raw body signature.
 3. API validates and normalizes the pull request payload.
-4. Deterministic reviewer providers generate findings and a summary.
-5. API stores the normalized event and review result idempotently by delivery ID.
-6. Future review workers retrieve PR diff context from GitHub for deeper analysis.
-7. Future publisher writes a single idempotent PR summary comment.
+4. API checks for an existing delivery record and returns it immediately on duplicate replay.
+5. API retrieves changed pull request files from GitHub's PR files endpoint.
+6. Deterministic reviewer providers generate findings and a summary from real file paths and available patches.
+7. API stores the normalized event and review result idempotently by delivery ID.
+8. Future publisher writes a single idempotent PR summary comment.
 
-The current implementation runs deterministic review inline and stores review events in PostgreSQL. Tests exercise the same store contract through an isolated in-memory PostgreSQL adapter, while route tests can still inject the in-memory implementation for dependency-free API behavior.
+The current implementation runs deterministic review inline, fetches PR files through an injectable GitHub client, and stores review events in PostgreSQL. Tests exercise the same store contract through an isolated in-memory PostgreSQL adapter, while route tests can still inject the in-memory store and GitHub client for dependency-free API behavior.
 
 Schema changes are applied with `npm run migrate`, which executes checked-in `migrations/*.sql` files in filename order using `DATABASE_URL`. The current migration creates the durable `review_events` audit table and supporting lookup indexes.
 
@@ -84,7 +87,9 @@ Schema changes are applied with `npm run migrate`, which executes checked-in `mi
 - Return `202` for unsupported but valid GitHub event types.
 - Treat duplicate delivery IDs as successful idempotent replays.
 - Return `404` for audit lookups when a delivery ID has not been stored.
-- Retry transient GitHub API and provider failures with bounded attempts.
+- Fall back to pull request body text when GitHub file retrieval fails or returns no changed files.
+- Keep file paths when GitHub omits patches for large or binary files.
+- Retry transient GitHub API and provider failures with bounded attempts once async workers exist.
 - Move terminal failures into a dead-letter state with last error context.
 
 ## 10. Observability
@@ -99,6 +104,7 @@ Schema changes are applied with `npm run migrate`, which executes checked-in `mi
 
 - Verify webhook signatures before payload processing.
 - Keep webhook secrets and GitHub App private keys outside source control.
+- Load GitHub API credentials from `GITHUB_TOKEN` or future installation-token minting, never checked-in files.
 - Avoid logging raw diffs by default.
 - Redact likely credentials before provider calls.
 - Scope GitHub App permissions to pull requests and contents read access unless publishing requires more.
@@ -109,11 +115,12 @@ Schema changes are applied with `npm run migrate`, which executes checked-in `mi
 - Deterministic rules are less capable than LLM review but make local behavior reproducible and testable.
 - Inline review is acceptable for the first slice; production review work should move to a queue.
 - PostgreSQL gives durable replay/audit behavior; the explicit store interface keeps local tests and future queue workers from depending on Express route internals.
+- Fetching files inline improves review quality now, while a fallback path keeps webhook intake reliable when GitHub API calls fail.
 
 ## 13. Future Improvements
 
 - BullMQ worker and dead-letter queue.
 - GitHub App installation authentication.
-- Diff retrieval and file-level findings.
+- File-level finding locations.
 - LLM provider abstraction with prompt redaction.
 - PR comment publishing and update-in-place behavior.

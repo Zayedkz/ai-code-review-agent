@@ -53,4 +53,18 @@ describe("DeterministicReviewer", () => {
     expect(review.riskLevel).toBe("low");
     expect(review.findings).toEqual([]);
   });
+
+  it("uses fetched file paths to recognize test-only changes even when patches are unavailable", () => {
+    const review = new DeterministicReviewer().review(baseEvent, {
+      files: [
+        {
+          path: "tests/snapshot.test.ts",
+          patch: "",
+        },
+      ],
+    });
+
+    expect(review.riskLevel).toBe("low");
+    expect(review.findings).toEqual([]);
+  });
 });
