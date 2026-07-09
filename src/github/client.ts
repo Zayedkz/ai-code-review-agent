@@ -1,5 +1,6 @@
 import type { NormalizedPullRequestEvent } from "./events.js";
 import type { PullRequestDiff } from "../review/reviewer.js";
+import type { GitHubInstallationTokenProvider } from "./auth.js";
 
 export interface PullRequestFileClient {
   fetchPullRequestDiff(event: NormalizedPullRequestEvent): Promise<PullRequestDiff>;
@@ -11,7 +12,7 @@ type GitHubPullRequestFile = {
 };
 
 export type GitHubClientOptions = {
-  token?: string;
+  installationTokenProvider?: GitHubInstallationTokenProvider;
   apiBaseUrl?: string;
   fetchImpl?: typeof fetch;
 };
@@ -19,17 +20,18 @@ export type GitHubClientOptions = {
 export class GitHubPullRequestFileClient implements PullRequestFileClient {
   private readonly apiBaseUrl: string;
   private readonly fetchImpl: typeof fetch;
-  private readonly token?: string;
+  private readonly installationTokenProvider?: GitHubInstallationTokenProvider;
 
   constructor(options: GitHubClientOptions = {}) {
     this.apiBaseUrl = (options.apiBaseUrl ?? "https://api.github.com").replace(/\/$/, "");
     this.fetchImpl = options.fetchImpl ?? fetch;
-    this.token = options.token;
+    this.installationTokenProvider = options.installationTokenProvider;
   }
 
   async fetchPullRequestDiff(event: NormalizedPullRequestEvent): Promise<PullRequestDiff> {
     const files: PullRequestDiff["files"] = [];
     const [owner, repo] = parseRepository(event.repository);
+    const token = await this.installationTokenProvider?.getInstallationToken(event);
     let page = 1;
 
     while (true) {
@@ -40,7 +42,7 @@ export class GitHubPullRequestFileClient implements PullRequestFileClient {
       url.searchParams.set("page", String(page));
 
       const response = await this.fetchImpl(url, {
-        headers: this.headers(),
+        headers: this.headers(token),
       });
 
       if (!response.ok) {
@@ -64,15 +66,15 @@ export class GitHubPullRequestFileClient implements PullRequestFileClient {
     return { files };
   }
 
-  private headers(): HeadersInit {
+  private headers(token?: string): HeadersInit {
     const headers: HeadersInit = {
       accept: "application/vnd.github+json",
       "user-agent": "ai-code-review-agent",
       "x-github-api-version": "2022-11-28",
     };
 
-    if (this.token) {
-      headers.authorization = `Bearer ${this.token}`;
+    if (token) {
+      headers.authorization = `Bearer ${token}`;
     }
 
     return headers;

@@ -2,6 +2,11 @@ import { z } from "zod";
 
 export const pullRequestWebhookSchema = z.object({
   action: z.string(),
+  installation: z
+    .object({
+      id: z.number().int().positive(),
+    })
+    .optional(),
   repository: z.object({
     full_name: z.string(),
     html_url: z.string().url(),
@@ -47,6 +52,7 @@ export type NormalizedPullRequestEvent = {
   additions: number;
   deletions: number;
   body: string | null;
+  installationId: number | null;
 };
 
 export function normalizePullRequestEvent(
@@ -70,5 +76,6 @@ export function normalizePullRequestEvent(
     additions: payload.pull_request.additions ?? 0,
     deletions: payload.pull_request.deletions ?? 0,
     body: payload.pull_request.body ?? null,
+    installationId: payload.installation?.id ?? null,
   };
 }

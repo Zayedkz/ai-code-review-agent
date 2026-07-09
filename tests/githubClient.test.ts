@@ -20,6 +20,7 @@ const event: NormalizedPullRequestEvent = {
   additions: 80,
   deletions: 10,
   body: null,
+  installationId: 12345,
 };
 
 describe("GitHubPullRequestFileClient", () => {
@@ -38,7 +39,9 @@ describe("GitHubPullRequestFileClient", () => {
 
     const diff = await new GitHubPullRequestFileClient({
       apiBaseUrl: "https://api.github.test",
-      token: "test-token",
+      installationTokenProvider: {
+        getInstallationToken: async () => "installation-token",
+      },
       fetchImpl,
     }).fetchPullRequestDiff(event);
 
@@ -50,8 +53,22 @@ describe("GitHubPullRequestFileClient", () => {
       "https://api.github.test/repos/Zayedkz/example/pulls/12/files?per_page=100&page=1",
     );
     expect(calls[0]?.init?.headers).toMatchObject({
-      authorization: "Bearer test-token",
+      authorization: "Bearer installation-token",
       accept: "application/vnd.github+json",
+    });
+  });
+
+  it("retrieves files without auth when no installation token provider is configured", async () => {
+    const calls: Array<{ input: string | URL | Request; init?: RequestInit }> = [];
+    const fetchImpl: typeof fetch = async (input, init) => {
+      calls.push({ input, init });
+      return new Response(JSON.stringify([]), { status: 200 });
+    };
+
+    await new GitHubPullRequestFileClient({ fetchImpl }).fetchPullRequestDiff(event);
+
+    expect(calls[0]?.init?.headers).not.toMatchObject({
+      authorization: expect.any(String),
     });
   });
 

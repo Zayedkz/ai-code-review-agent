@@ -5,6 +5,7 @@ import {
   GitHubPullRequestFileClient,
   type PullRequestFileClient,
 } from "../github/client.js";
+import { createGitHubInstallationTokenProvider } from "../github/auth.js";
 import {
   normalizePullRequestEvent,
   pullRequestWebhookSchema,
@@ -35,7 +36,7 @@ export function createApp(options: CreateAppOptions) {
   const pullRequestFileClient =
     options.pullRequestFileClient ??
     new GitHubPullRequestFileClient({
-      token: options.settings.githubToken,
+      installationTokenProvider: createGitHubInstallationTokenProvider(options.settings),
       apiBaseUrl: options.settings.githubApiBaseUrl,
     });
   const app = express();

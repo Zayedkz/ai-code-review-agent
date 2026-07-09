@@ -20,6 +20,7 @@ const baseEvent: NormalizedPullRequestEvent = {
   additions: 80,
   deletions: 10,
   body: null,
+  installationId: null,
 };
 
 describe("DeterministicReviewer", () => {

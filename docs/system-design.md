@@ -7,7 +7,7 @@
 - Retrieve changed pull request file paths and patches from GitHub.
 - Analyze pull request metadata and fetched diffs for risk signals.
 - Produce actionable summaries, findings, and recommendations.
-- Publish review output back to GitHub once GitHub App auth is connected.
+- Publish review output back to GitHub once comment publishing is connected.
 
 ## 2. Non-Goals
 
@@ -21,6 +21,7 @@
 - Verify `x-hub-signature-256` using the configured webhook secret.
 - Accept pull request webhook events and ignore unsupported event types.
 - Deduplicate events by GitHub delivery ID.
+- Mint scoped GitHub App installation tokens for changed file metadata and patch retrieval.
 - Fetch changed file metadata and patches through a GitHub client boundary.
 - Generate review findings from deterministic local rules.
 - Expose stored delivery audit details through a read-only endpoint.
@@ -64,12 +65,13 @@ Planned endpoints:
 2. API verifies the raw body signature.
 3. API validates and normalizes the pull request payload.
 4. API checks for an existing delivery record and returns it immediately on duplicate replay.
-5. API retrieves changed pull request files from GitHub's PR files endpoint.
-6. Deterministic reviewer providers generate findings and a summary from real file paths and available patches.
-7. API stores the normalized event and review result idempotently by delivery ID.
-8. Future publisher writes a single idempotent PR summary comment.
+5. API mints a short-lived GitHub App installation token for the webhook installation ID.
+6. API retrieves changed pull request files from GitHub's PR files endpoint with the installation token.
+7. Deterministic reviewer providers generate findings and a summary from real file paths and available patches.
+8. API stores the normalized event and review result idempotently by delivery ID.
+9. Future publisher writes a single idempotent PR summary comment.
 
-The current implementation runs deterministic review inline, fetches PR files through an injectable GitHub client, and stores review events in PostgreSQL. Tests exercise the same store contract through an isolated in-memory PostgreSQL adapter, while route tests can still inject the in-memory store and GitHub client for dependency-free API behavior.
+The current implementation runs deterministic review inline, mints GitHub App installation tokens through an injectable provider, fetches PR files through an injectable GitHub client, and stores review events in PostgreSQL. Tests exercise the same store contract through an isolated in-memory PostgreSQL adapter, while route tests can still inject the in-memory store and GitHub client for dependency-free API behavior.
 
 Schema changes are applied with `npm run migrate`, which executes checked-in `migrations/*.sql` files in filename order using `DATABASE_URL`. The current migration creates the durable `review_events` audit table and supporting lookup indexes.
 
@@ -87,7 +89,7 @@ Schema changes are applied with `npm run migrate`, which executes checked-in `mi
 - Return `202` for unsupported but valid GitHub event types.
 - Treat duplicate delivery IDs as successful idempotent replays.
 - Return `404` for audit lookups when a delivery ID has not been stored.
-- Fall back to pull request body text when GitHub file retrieval fails or returns no changed files.
+- Fall back to pull request body text when GitHub App token minting, file retrieval, or empty file responses fail.
 - Keep file paths when GitHub omits patches for large or binary files.
 - Retry transient GitHub API and provider failures with bounded attempts once async workers exist.
 - Move terminal failures into a dead-letter state with last error context.
@@ -104,10 +106,11 @@ Schema changes are applied with `npm run migrate`, which executes checked-in `mi
 
 - Verify webhook signatures before payload processing.
 - Keep webhook secrets and GitHub App private keys outside source control.
-- Load GitHub API credentials from `GITHUB_TOKEN` or future installation-token minting, never checked-in files.
+- Load GitHub App credentials from environment variables or mounted private-key files, never checked-in files.
+- Mint short-lived installation access tokens per webhook installation instead of storing long-lived GitHub API tokens.
 - Avoid logging raw diffs by default.
 - Redact likely credentials before provider calls.
-- Scope GitHub App permissions to pull requests and contents read access unless publishing requires more.
+- Scope GitHub App permissions to pull requests read access for PR file retrieval, adding contents read or pull request write only when later features require them.
 
 ## 12. Tradeoffs
 
@@ -120,7 +123,6 @@ Schema changes are applied with `npm run migrate`, which executes checked-in `mi
 ## 13. Future Improvements
 
 - BullMQ worker and dead-letter queue.
-- GitHub App installation authentication.
 - File-level finding locations.
 - LLM provider abstraction with prompt redaction.
 - PR comment publishing and update-in-place behavior.
