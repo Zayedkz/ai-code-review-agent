@@ -1,5 +1,7 @@
+import { generateKeyPairSync } from "node:crypto";
+
 import request from "supertest";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { loadSettings } from "../src/config/settings.js";
 import type { PullRequestFileClient } from "../src/github/client.js";
@@ -14,6 +16,10 @@ const settings = loadSettings({
 });
 
 describe("GitHub webhook endpoint", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
   it("accepts signed pull_request events and stores them idempotently", async () => {
     const store = new InMemoryReviewEventStore();
     const pullRequestFileClient = new CountingPullRequestFileClient();
@@ -130,6 +136,32 @@ describe("GitHub webhook endpoint", () => {
       "secret-handling-review",
     ]);
   });
+
+  it("falls back to pull request body review when installation token minting fails", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("unauthorized", { status: 401 }));
+    const app = createApp({
+      settings: loadSettings({
+        APP_ENV: "test",
+        PORT: "8080",
+        GITHUB_WEBHOOK_SECRET: "test-secret",
+        GITHUB_APP_ID: "12345",
+        GITHUB_APP_PRIVATE_KEY: testPrivateKey(),
+      }),
+      store: new InMemoryReviewEventStore(),
+    });
+    const payload = pullRequestPayload({
+      body: "This PR uses process.env.GITHUB_TOKEN and has TODO follow-up work.",
+    });
+
+    const response = await postWebhook(app, payload, "delivery-auth-fallback");
+
+    expect(response.statusCode).toBe(202);
+    expect(response.body.accepted).toBe(true);
+    expect(response.body.review.riskLevel).toBe("high");
+    expect(response.body.review.findings.map((finding: { code: string }) => finding.code)).toEqual(
+      expect.arrayContaining(["secret-handling-review", "debug-or-placeholder-code"]),
+    );
+  });
 });
 
 async function postWebhook(
@@ -164,6 +196,9 @@ class CountingPullRequestFileClient extends BodyFallbackPullRequestFileClient {
 
 type PullRequestPayload = {
   action: string;
+  installation: {
+    id: number;
+  };
   repository: {
     full_name: string;
     html_url: string;
@@ -185,6 +220,9 @@ type PullRequestPayload = {
 function pullRequestPayload(overrides: Partial<PullRequestPayload["pull_request"]> = {}): PullRequestPayload {
   return {
     action: "opened",
+    installation: {
+      id: 12345,
+    },
     repository: {
       full_name: "Zayedkz/example",
       html_url: "https://github.com/Zayedkz/example",
@@ -203,4 +241,9 @@ function pullRequestPayload(overrides: Partial<PullRequestPayload["pull_request"
       ...overrides,
     },
   };
+}
+
+function testPrivateKey(): string {
+  const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+  return privateKey.export({ type: "pkcs8", format: "pem" }).toString();
 }

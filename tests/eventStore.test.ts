@@ -159,6 +159,7 @@ function normalizedEvent(deliveryId: string): NormalizedPullRequestEvent {
     additions: 900,
     deletions: 40,
     body: "This PR uses process.env.GITHUB_TOKEN and has TODO follow-up work.",
+    installationId: 12345,
   };
 }
 
