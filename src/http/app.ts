@@ -2,28 +2,27 @@ import express, { type NextFunction, type Request, type Response } from "express
 
 import type { Settings } from "../config/settings.js";
 import {
-  GitHubPullRequestFileClient,
-  type PullRequestFileClient,
-} from "../github/client.js";
-import { createGitHubInstallationTokenProvider } from "../github/auth.js";
-import {
   normalizePullRequestEvent,
   pullRequestWebhookSchema,
-  type PullRequestWebhook,
 } from "../github/events.js";
 import { verifyGitHubSignature } from "../github/signature.js";
-import { DeterministicReviewer, type PullRequestDiff } from "../review/reviewer.js";
+import { InMemoryReviewQueue, type ReviewQueue } from "../queue/reviewQueue.js";
 import {
   type StoredReviewEvent,
   createPostgresReviewEventStore,
   type ReviewEventStore,
 } from "../storage/eventStore.js";
+import {
+  InMemoryReviewJobStore,
+  type ReviewJobRecord,
+  type ReviewJobStore,
+} from "../storage/reviewJobStore.js";
 
 type CreateAppOptions = {
   settings: Settings;
   store?: ReviewEventStore;
-  reviewer?: DeterministicReviewer;
-  pullRequestFileClient?: PullRequestFileClient;
+  jobStore?: ReviewJobStore;
+  reviewQueue?: ReviewQueue;
 };
 
 type RawBodyRequest = Request & {
@@ -32,13 +31,8 @@ type RawBodyRequest = Request & {
 
 export function createApp(options: CreateAppOptions) {
   const store = options.store ?? createPostgresReviewEventStore(options.settings.databaseUrl);
-  const reviewer = options.reviewer ?? new DeterministicReviewer();
-  const pullRequestFileClient =
-    options.pullRequestFileClient ??
-    new GitHubPullRequestFileClient({
-      installationTokenProvider: createGitHubInstallationTokenProvider(options.settings),
-      apiBaseUrl: options.settings.githubApiBaseUrl,
-    });
+  const jobStore = options.jobStore ?? new InMemoryReviewJobStore();
+  const reviewQueue = options.reviewQueue ?? new InMemoryReviewQueue();
   const app = express();
 
   app.use(
@@ -51,20 +45,23 @@ export function createApp(options: CreateAppOptions) {
 
   app.get("/health", asyncHandler(async (_request: Request, response: Response) => {
     const storedEvents = await store.count();
+    const reviewJobs = await jobStore.countByStatus();
     response.json({
       status: "ok",
       environment: options.settings.appEnv,
       storedEvents,
+      reviewJobs,
     });
   }));
 
   app.get("/reviews/:deliveryId", asyncHandler(async (request: Request, response: Response) => {
     const stored = await store.get(request.params.deliveryId);
-    if (!stored) {
+    const job = await jobStore.get(request.params.deliveryId);
+    if (!stored && !job) {
       return response.status(404).json({ error: "review delivery not found" });
     }
 
-    return response.json(reviewAuditResponse(stored));
+    return response.json(reviewAuditResponse(stored, job));
   }));
 
   app.post("/webhooks/github", asyncHandler(async (request: RawBodyRequest, response: Response) => {
@@ -92,24 +89,35 @@ export function createApp(options: CreateAppOptions) {
 
     const event = normalizePullRequestEvent(deliveryId, parsed.data);
     const existing = await store.get(deliveryId);
+    const existingJob = await jobStore.get(deliveryId);
     if (existing) {
       return response.status(200).json({
         accepted: true,
         duplicate: true,
         deliveryId,
+        job: existingJob ? reviewJobResponse(existingJob) : undefined,
         review: existing.review,
       });
     }
+    if (existingJob) {
+      return response.status(200).json({
+        accepted: true,
+        duplicate: true,
+        deliveryId,
+        job: reviewJobResponse(existingJob),
+      });
+    }
 
-    const diff = await extractDiff(parsed.data, event, pullRequestFileClient);
-    const review = reviewer.review(event, diff);
-    const saved = await store.save(event, review);
+    const created = await jobStore.create(event, options.settings.reviewJobMaxAttempts);
+    if (created.created) {
+      await reviewQueue.enqueue(event);
+    }
 
-    return response.status(saved.stored ? 202 : 200).json({
+    return response.status(202).json({
       accepted: true,
-      duplicate: !saved.stored,
+      duplicate: false,
       deliveryId,
-      review: saved.record.review,
+      job: reviewJobResponse(created.record),
     });
   }));
 
@@ -122,56 +130,42 @@ export function createApp(options: CreateAppOptions) {
   return app;
 }
 
-function reviewAuditResponse(stored: StoredReviewEvent) {
+function reviewAuditResponse(stored?: StoredReviewEvent, job?: ReviewJobRecord) {
   return {
-    deliveryId: stored.event.deliveryId,
-    status: "stored",
-    duplicateReplayBehavior: "duplicate deliveries return the originally stored review",
-    repository: stored.event.repository,
-    repositoryUrl: stored.event.repositoryUrl,
-    pullRequestNumber: stored.event.pullRequestNumber,
-    pullRequestTitle: stored.event.pullRequestTitle,
-    pullRequestUrl: stored.event.pullRequestUrl,
-    action: stored.event.action,
-    headSha: stored.event.headSha,
-    headRef: stored.event.headRef,
-    baseSha: stored.event.baseSha,
-    baseRef: stored.event.baseRef,
-    riskLevel: stored.review.riskLevel,
-    summary: stored.review.summary,
-    findings: stored.review.findings,
-    receivedAt: stored.receivedAt,
-    updatedAt: stored.updatedAt,
+    deliveryId: stored?.event.deliveryId ?? job?.deliveryId,
+    status: stored ? "stored" : job?.status,
+    duplicateReplayBehavior: "duplicate deliveries return the existing review or queued job state",
+    job: job ? reviewJobResponse(job) : undefined,
+    repository: stored?.event.repository ?? job?.event.repository,
+    repositoryUrl: stored?.event.repositoryUrl ?? job?.event.repositoryUrl,
+    pullRequestNumber: stored?.event.pullRequestNumber ?? job?.event.pullRequestNumber,
+    pullRequestTitle: stored?.event.pullRequestTitle ?? job?.event.pullRequestTitle,
+    pullRequestUrl: stored?.event.pullRequestUrl ?? job?.event.pullRequestUrl,
+    action: stored?.event.action ?? job?.event.action,
+    headSha: stored?.event.headSha ?? job?.event.headSha,
+    headRef: stored?.event.headRef ?? job?.event.headRef,
+    baseSha: stored?.event.baseSha ?? job?.event.baseSha,
+    baseRef: stored?.event.baseRef ?? job?.event.baseRef,
+    riskLevel: stored?.review.riskLevel,
+    summary: stored?.review.summary,
+    findings: stored?.review.findings,
+    receivedAt: stored?.receivedAt,
+    updatedAt: stored?.updatedAt ?? job?.updatedAt,
   };
 }
 
-async function extractDiff(
-  payload: PullRequestWebhook,
-  event: ReturnType<typeof normalizePullRequestEvent>,
-  pullRequestFileClient: PullRequestFileClient,
-): Promise<PullRequestDiff> {
-  try {
-    const diff = await pullRequestFileClient.fetchPullRequestDiff(event);
-    if (diff.files.length > 0) {
-      return diff;
-    }
-  } catch (error) {
-    console.warn("GitHub PR file retrieval failed; falling back to pull request body", {
-      deliveryId: event.deliveryId,
-      repository: event.repository,
-      pullRequestNumber: event.pullRequestNumber,
-      error: error instanceof Error ? error.message : "unknown error",
-    });
-  }
-
-  const body = payload.pull_request.body ?? "";
+function reviewJobResponse(job: ReviewJobRecord) {
   return {
-    files: [
-      {
-        path: "pull-request-description.md",
-        patch: body,
-      },
-    ],
+    deliveryId: job.deliveryId,
+    status: job.status,
+    attempts: job.attempts,
+    maxAttempts: job.maxAttempts,
+    lastError: job.lastError,
+    queuedAt: job.queuedAt,
+    startedAt: job.startedAt,
+    completedAt: job.completedAt,
+    failedAt: job.failedAt,
+    updatedAt: job.updatedAt,
   };
 }
 

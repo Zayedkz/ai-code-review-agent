@@ -1,18 +1,18 @@
-import { generateKeyPairSync } from "node:crypto";
-
 import request from "supertest";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { loadSettings } from "../src/config/settings.js";
-import type { PullRequestFileClient } from "../src/github/client.js";
 import { createGitHubSignature } from "../src/github/signature.js";
 import { createApp } from "../src/http/app.js";
+import { InMemoryReviewQueue } from "../src/queue/reviewQueue.js";
 import { InMemoryReviewEventStore } from "../src/storage/eventStore.js";
+import { InMemoryReviewJobStore } from "../src/storage/reviewJobStore.js";
 
 const settings = loadSettings({
   APP_ENV: "test",
   PORT: "8080",
   GITHUB_WEBHOOK_SECRET: "test-secret",
+  REVIEW_JOB_MAX_ATTEMPTS: "3",
 });
 
 describe("GitHub webhook endpoint", () => {
@@ -20,28 +20,49 @@ describe("GitHub webhook endpoint", () => {
     vi.restoreAllMocks();
   });
 
-  it("accepts signed pull_request events and stores them idempotently", async () => {
+  it("accepts signed pull_request events and enqueues them idempotently", async () => {
     const store = new InMemoryReviewEventStore();
-    const pullRequestFileClient = new CountingPullRequestFileClient();
-    const app = createApp({ settings, store, pullRequestFileClient });
+    const jobStore = new InMemoryReviewJobStore();
+    const reviewQueue = new InMemoryReviewQueue();
+    const app = createApp({ settings, store, jobStore, reviewQueue });
     const payload = pullRequestPayload();
 
     const first = await postWebhook(app, payload, "delivery-123");
     const second = await postWebhook(app, payload, "delivery-123");
 
     expect(first.statusCode).toBe(202);
-    expect(first.body.accepted).toBe(true);
-    expect(first.body.duplicate).toBe(false);
-    expect(first.body.review.riskLevel).toBe("high");
+    expect(first.body).toMatchObject({
+      accepted: true,
+      duplicate: false,
+      deliveryId: "delivery-123",
+      job: {
+        deliveryId: "delivery-123",
+        status: "queued",
+        attempts: 0,
+        maxAttempts: 3,
+      },
+    });
     expect(second.statusCode).toBe(200);
-    expect(second.body.duplicate).toBe(true);
-    await expect(store.count()).resolves.toBe(1);
-    expect(pullRequestFileClient.calls).toBe(1);
+    expect(second.body).toMatchObject({
+      accepted: true,
+      duplicate: true,
+      deliveryId: "delivery-123",
+      job: {
+        status: "queued",
+      },
+    });
+    await expect(store.count()).resolves.toBe(0);
+    expect(reviewQueue.enqueued).toHaveLength(1);
   });
 
-  it("returns stored review delivery audit details", async () => {
-    const store = new InMemoryReviewEventStore();
-    const app = createApp({ settings, store, pullRequestFileClient: new BodyFallbackPullRequestFileClient() });
+  it("returns queued delivery audit details before worker completion", async () => {
+    const jobStore = new InMemoryReviewJobStore();
+    const app = createApp({
+      settings,
+      store: new InMemoryReviewEventStore(),
+      jobStore,
+      reviewQueue: new InMemoryReviewQueue(),
+    });
     const payload = pullRequestPayload();
 
     await postWebhook(app, payload, "delivery-audit");
@@ -50,20 +71,17 @@ describe("GitHub webhook endpoint", () => {
     expect(response.statusCode).toBe(200);
     expect(response.body).toMatchObject({
       deliveryId: "delivery-audit",
-      status: "stored",
-      duplicateReplayBehavior: "duplicate deliveries return the originally stored review",
+      status: "queued",
+      duplicateReplayBehavior: "duplicate deliveries return the existing review or queued job state",
       repository: "Zayedkz/example",
       pullRequestNumber: 7,
       action: "opened",
       headSha: "abc123",
-      riskLevel: "high",
+      job: {
+        deliveryId: "delivery-audit",
+        status: "queued",
+      },
     });
-    expect(response.body.findings).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ code: "secret-handling-review", severity: "critical" }),
-      ]),
-    );
-    expect(response.body.receivedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
     expect(response.body.updatedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
   });
 
@@ -80,7 +98,8 @@ describe("GitHub webhook endpoint", () => {
     const app = createApp({
       settings,
       store: new InMemoryReviewEventStore(),
-      pullRequestFileClient: new BodyFallbackPullRequestFileClient(),
+      jobStore: new InMemoryReviewJobStore(),
+      reviewQueue: new InMemoryReviewQueue(),
     });
     const payload = pullRequestPayload();
 
@@ -94,8 +113,13 @@ describe("GitHub webhook endpoint", () => {
     expect(response.statusCode).toBe(401);
   });
 
-  it("returns health with stored event count", async () => {
-    const app = createApp({ settings, store: new InMemoryReviewEventStore() });
+  it("returns health with stored event count and job state counts", async () => {
+    const app = createApp({
+      settings,
+      store: new InMemoryReviewEventStore(),
+      jobStore: new InMemoryReviewJobStore(),
+      reviewQueue: new InMemoryReviewQueue(),
+    });
 
     const response = await request(app).get("/health");
 
@@ -104,63 +128,14 @@ describe("GitHub webhook endpoint", () => {
       status: "ok",
       environment: "test",
       storedEvents: 0,
-    });
-  });
-
-  it("reviews fetched GitHub file paths instead of only pull request body text", async () => {
-    const store = new InMemoryReviewEventStore();
-    const app = createApp({
-      settings,
-      store,
-      pullRequestFileClient: {
-        fetchPullRequestDiff: async () => ({
-          files: [
-            { path: "src/config.ts", patch: "+ const token = process.env.GITHUB_TOKEN;" },
-            { path: "tests/config.test.ts", patch: "+ expect(config).toBeDefined();" },
-          ],
-        }),
+      reviewJobs: {
+        queued: 0,
+        running: 0,
+        completed: 0,
+        failed: 0,
+        dead_letter: 0,
       },
     });
-    const payload = pullRequestPayload({
-      changed_files: 2,
-      additions: 40,
-      deletions: 2,
-      body: "Safe body text without implementation details.",
-    });
-
-    const response = await postWebhook(app, payload, "delivery-real-diff");
-
-    expect(response.statusCode).toBe(202);
-    expect(response.body.review.riskLevel).toBe("high");
-    expect(response.body.review.findings.map((finding: { code: string }) => finding.code)).toEqual([
-      "secret-handling-review",
-    ]);
-  });
-
-  it("falls back to pull request body review when installation token minting fails", async () => {
-    vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("unauthorized", { status: 401 }));
-    const app = createApp({
-      settings: loadSettings({
-        APP_ENV: "test",
-        PORT: "8080",
-        GITHUB_WEBHOOK_SECRET: "test-secret",
-        GITHUB_APP_ID: "12345",
-        GITHUB_APP_PRIVATE_KEY: testPrivateKey(),
-      }),
-      store: new InMemoryReviewEventStore(),
-    });
-    const payload = pullRequestPayload({
-      body: "This PR uses process.env.GITHUB_TOKEN and has TODO follow-up work.",
-    });
-
-    const response = await postWebhook(app, payload, "delivery-auth-fallback");
-
-    expect(response.statusCode).toBe(202);
-    expect(response.body.accepted).toBe(true);
-    expect(response.body.review.riskLevel).toBe("high");
-    expect(response.body.review.findings.map((finding: { code: string }) => finding.code)).toEqual(
-      expect.arrayContaining(["secret-handling-review", "debug-or-placeholder-code"]),
-    );
   });
 });
 
@@ -177,21 +152,6 @@ async function postWebhook(
     .set("x-github-delivery", deliveryId)
     .set("x-hub-signature-256", createGitHubSignature(settings.githubWebhookSecret, body))
     .send(body);
-}
-
-class BodyFallbackPullRequestFileClient implements PullRequestFileClient {
-  async fetchPullRequestDiff() {
-    return { files: [] };
-  }
-}
-
-class CountingPullRequestFileClient extends BodyFallbackPullRequestFileClient {
-  calls = 0;
-
-  override async fetchPullRequestDiff() {
-    this.calls += 1;
-    return super.fetchPullRequestDiff();
-  }
 }
 
 type PullRequestPayload = {
@@ -241,9 +201,4 @@ function pullRequestPayload(overrides: Partial<PullRequestPayload["pull_request"
       ...overrides,
     },
   };
-}
-
-function testPrivateKey(): string {
-  const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
-  return privateKey.export({ type: "pkcs8", format: "pem" }).toString();
 }

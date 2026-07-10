@@ -9,7 +9,8 @@
     "dev": "tsx watch src/server.ts",
     "lint": "eslint .",
     "migrate": "tsx src/db/migrate.ts",
-    "test": "vitest run",
+    "worker": "tsx src/worker.ts",
+    "test": "vitest run --dir tests",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "keywords": [
@@ -21,6 +22,7 @@
   "author": "",
   "license": "MIT",
   "dependencies": {
+    "bullmq": "^5.80.1",
     "express": "^4.19.2",
     "pg": "^8.22.0",
     "zod": "^3.23.8"

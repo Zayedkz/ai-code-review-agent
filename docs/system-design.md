@@ -3,7 +3,7 @@
 ## 1. Goals
 
 - Receive GitHub pull request webhook events securely.
-- Normalize and persist review events idempotently.
+- Normalize and enqueue review events idempotently.
 - Retrieve changed pull request file paths and patches from GitHub.
 - Analyze pull request metadata and fetched diffs for risk signals.
 - Produce actionable summaries, findings, and recommendations.
@@ -21,6 +21,8 @@
 - Verify `x-hub-signature-256` using the configured webhook secret.
 - Accept pull request webhook events and ignore unsupported event types.
 - Deduplicate events by GitHub delivery ID.
+- Persist review job state for queued, running, completed, failed, and dead-letter outcomes.
+- Run review work through Redis/BullMQ with bounded retry.
 - Mint scoped GitHub App installation tokens for changed file metadata and patch retrieval.
 - Fetch changed file metadata and patches through a GitHub client boundary.
 - Generate review findings from deterministic local rules.
@@ -37,13 +39,13 @@
 
 ## 5. Data Model
 
-Current entity:
+Current entities:
 
 - `review_events`: unique delivery ID, repository, repository URL, PR number, action, head SHA, risk level, normalized event JSON, review JSON, received timestamp, updated timestamp.
+- `review_jobs`: unique delivery ID, status, attempt count, max attempts, last error, normalized event JSON, queued/started/completed/failed timestamps, updated timestamp.
 
 Planned entities:
 
-- `review_runs`: event ID, provider, status, risk level, attempt count, last error, timestamps.
 - `review_findings`: run ID, code, severity, message, recommendation, optional file path and line.
 - `published_comments`: run ID, GitHub comment ID, head SHA, body hash, timestamps.
 
@@ -51,8 +53,8 @@ Planned entities:
 
 Initial endpoints:
 
-- `GET /health`: service health and persisted event count.
-- `GET /reviews/{deliveryId}`: inspect review event status, duplicate replay behavior, repository, PR number, action, head SHA, risk level, findings, and timestamps.
+- `GET /health`: service health, persisted event count, and review job counts by state.
+- `GET /reviews/{deliveryId}`: inspect review job status, duplicate replay behavior, repository, PR number, action, head SHA, attempts, last error, and completed findings when available.
 - `POST /webhooks/github`: signed GitHub webhook intake for pull request events.
 
 Planned endpoints:
@@ -64,16 +66,17 @@ Planned endpoints:
 1. GitHub sends a pull request webhook.
 2. API verifies the raw body signature.
 3. API validates and normalizes the pull request payload.
-4. API checks for an existing delivery record and returns it immediately on duplicate replay.
-5. API mints a short-lived GitHub App installation token for the webhook installation ID.
-6. API retrieves changed pull request files from GitHub's PR files endpoint with the installation token.
-7. Deterministic reviewer providers generate findings and a summary from real file paths and available patches.
-8. API stores the normalized event and review result idempotently by delivery ID.
-9. Future publisher writes a single idempotent PR summary comment.
+4. API checks for an existing completed review or existing job and returns that state immediately on duplicate replay.
+5. API creates durable `review_jobs` state and enqueues a BullMQ job keyed by delivery ID.
+6. Worker claims the job, marks it running, and mints a short-lived GitHub App installation token for the webhook installation ID.
+7. Worker retrieves changed pull request files from GitHub's PR files endpoint with the installation token.
+8. Deterministic reviewer providers generate findings and a summary from real file paths and available patches.
+9. Worker stores the normalized event and review result idempotently by delivery ID, then marks the job completed.
+10. Future publisher writes a single idempotent PR summary comment.
 
-The current implementation runs deterministic review inline, mints GitHub App installation tokens through an injectable provider, fetches PR files through an injectable GitHub client, and stores review events in PostgreSQL. Tests exercise the same store contract through an isolated in-memory PostgreSQL adapter, while route tests can still inject the in-memory store and GitHub client for dependency-free API behavior.
+The current implementation keeps webhook intake queue-first, mints GitHub App installation tokens through an injectable provider in the worker, fetches PR files through an injectable GitHub client, stores review jobs and completed review events in PostgreSQL, and uses BullMQ for Redis-backed retry. Tests exercise the same store contracts through isolated in-memory PostgreSQL adapters, while route and worker tests inject in-memory queue/store implementations for dependency-free API behavior.
 
-Schema changes are applied with `npm run migrate`, which executes checked-in `migrations/*.sql` files in filename order using `DATABASE_URL`. The current migration creates the durable `review_events` audit table and supporting lookup indexes.
+Schema changes are applied with `npm run migrate`, which executes checked-in `migrations/*.sql` files in filename order using `DATABASE_URL`. The current migrations create the durable `review_events` audit table, `review_jobs` run-state table, and supporting lookup indexes.
 
 ## 8. Scaling Strategy
 
@@ -91,15 +94,15 @@ Schema changes are applied with `npm run migrate`, which executes checked-in `mi
 - Return `404` for audit lookups when a delivery ID has not been stored.
 - Fall back to pull request body text when GitHub App token minting, file retrieval, or empty file responses fail.
 - Keep file paths when GitHub omits patches for large or binary files.
-- Retry transient GitHub API and provider failures with bounded attempts once async workers exist.
-- Move terminal failures into a dead-letter state with last error context.
+- Retry provider failures with bounded BullMQ attempts.
+- Move terminal worker failures into a dead-letter state with last error context.
 
 ## 10. Observability
 
 - Structured logs for delivery ID, repository, PR number, action, and result.
 - Metrics for webhook latency, queue depth, review latency, provider failures, and publish failures.
-- Read-only audit lookup for stored review deliveries, including replay behavior and generated findings.
-- Future audit trail for each async review run and published comment.
+- Read-only audit lookup for review deliveries, including queue state, attempts, replay behavior, and generated findings.
+- Future audit trail for published comments.
 - Redacted traces across webhook, queue, GitHub API, and provider calls.
 
 ## 11. Security
@@ -116,13 +119,13 @@ Schema changes are applied with `npm run migrate`, which executes checked-in `mi
 
 - TypeScript/Express keeps the webhook surface straightforward and portfolio-readable; NestJS could help if the service grows significantly.
 - Deterministic rules are less capable than LLM review but make local behavior reproducible and testable.
-- Inline review is acceptable for the first slice; production review work should move to a queue.
+- Queue-backed review work keeps GitHub webhook intake fast and lets workers scale independently, at the cost of operating Redis and a separate worker process.
 - PostgreSQL gives durable replay/audit behavior; the explicit store interface keeps local tests and future queue workers from depending on Express route internals.
-- Fetching files inline improves review quality now, while a fallback path keeps webhook intake reliable when GitHub API calls fail.
+- Fetching files in the worker improves review quality, while a fallback path keeps review completion resilient when GitHub API calls fail.
 
 ## 13. Future Improvements
 
-- BullMQ worker and dead-letter queue.
+- Operator retry endpoint for dead-letter jobs.
 - File-level finding locations.
 - LLM provider abstraction with prompt redaction.
 - PR comment publishing and update-in-place behavior.
