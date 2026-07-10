@@ -10,12 +10,15 @@ import { loadSettings } from "../src/config/settings.js";
 import type { NormalizedPullRequestEvent } from "../src/github/events.js";
 import { createGitHubSignature } from "../src/github/signature.js";
 import { createApp } from "../src/http/app.js";
+import { InMemoryReviewQueue } from "../src/queue/reviewQueue.js";
+import { ReviewJobProcessor } from "../src/queue/reviewWorker.js";
 import type { ReviewSummary } from "../src/review/reviewer.js";
 import {
   type DbClient,
   PostgresReviewEventStore,
   type ReviewEventStore,
 } from "../src/storage/eventStore.js";
+import { InMemoryReviewJobStore } from "../src/storage/reviewJobStore.js";
 
 type TestPool = DbClient & {
   end(): Promise<void>;
@@ -73,14 +76,20 @@ describe("PostgresReviewEventStore", () => {
 });
 
 describe("webhook persistence", () => {
-  it("persists webhook review events through the configured store and exposes audit retrieval", async () => {
+  it("persists webhook review events after queued worker execution and exposes audit retrieval", async () => {
     const store = await createMemoryBackedStore();
-    const app = createApp({ settings, store });
+    const jobStore = new InMemoryReviewJobStore();
+    const reviewQueue = new InMemoryReviewQueue();
+    const app = createApp({ settings, store, jobStore, reviewQueue });
     const payload = pullRequestPayload();
 
     const response = await postWebhook(app, payload, "delivery-webhook");
 
     expect(response.statusCode).toBe(202);
+    expect(response.body.job.status).toBe("queued");
+    const processor = new ReviewJobProcessor({ eventStore: store, jobStore, maxAttempts: 3 });
+    await processor.process(reviewQueue.enqueued[0], 1);
+
     const stored = await store.get("delivery-webhook");
     expect(stored?.event.repository).toBe("Zayedkz/example");
     expect(stored?.event.headSha).toBe("abc123");
@@ -95,7 +104,11 @@ describe("webhook persistence", () => {
       action: "opened",
       headSha: "abc123",
       riskLevel: "high",
-      duplicateReplayBehavior: "duplicate deliveries return the originally stored review",
+      duplicateReplayBehavior: "duplicate deliveries return the existing review or queued job state",
+      job: {
+        status: "completed",
+        attempts: 1,
+      },
     });
     expect(audit.body.findings).toEqual(
       expect.arrayContaining([

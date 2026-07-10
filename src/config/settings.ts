@@ -11,6 +11,8 @@ const settingsSchema = z.object({
   githubApiBaseUrl: z.string().url().default("https://api.github.com"),
   databaseUrl: z.string().default("postgresql://postgres:postgres@localhost:5432/code_review_agent"),
   redisUrl: z.string().default("redis://localhost:6379/0"),
+  reviewJobMaxAttempts: z.coerce.number().int().positive().default(3),
+  reviewWorkerConcurrency: z.coerce.number().int().positive().default(2),
   llmProvider: z.string().default("mock"),
 });
 
@@ -28,6 +30,8 @@ export function loadSettings(env: NodeJS.ProcessEnv = process.env): Settings {
     githubApiBaseUrl: env.GITHUB_API_BASE_URL,
     databaseUrl: env.DATABASE_URL,
     redisUrl: env.REDIS_URL,
+    reviewJobMaxAttempts: env.REVIEW_JOB_MAX_ATTEMPTS,
+    reviewWorkerConcurrency: env.REVIEW_WORKER_CONCURRENCY,
     llmProvider: env.LLM_PROVIDER,
   });
 }
