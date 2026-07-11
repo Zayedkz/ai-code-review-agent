@@ -94,6 +94,119 @@ describe("GitHub webhook endpoint", () => {
     expect(response.body).toEqual({ error: "review delivery not found" });
   });
 
+  it("returns 404 when retrying a missing review delivery", async () => {
+    const app = createApp({
+      settings,
+      store: new InMemoryReviewEventStore(),
+      jobStore: new InMemoryReviewJobStore(),
+      reviewQueue: new InMemoryReviewQueue(),
+    });
+
+    const response = await request(app).post("/reviews/missing-delivery/retry");
+
+    expect(response.statusCode).toBe(404);
+    expect(response.body).toEqual({ error: "review delivery not found" });
+  });
+
+  it("rejects retry requests for review jobs that are not dead-lettered", async () => {
+    const jobStore = new InMemoryReviewJobStore();
+    const reviewQueue = new InMemoryReviewQueue();
+    const app = createApp({
+      settings,
+      store: new InMemoryReviewEventStore(),
+      jobStore,
+      reviewQueue,
+    });
+
+    await postWebhook(app, pullRequestPayload(), "delivery-active");
+    const response = await request(app).post("/reviews/delivery-active/retry");
+
+    expect(response.statusCode).toBe(409);
+    expect(response.body).toMatchObject({
+      error: "review delivery is not dead-lettered",
+      job: {
+        deliveryId: "delivery-active",
+        status: "queued",
+      },
+    });
+    expect(reviewQueue.enqueued).toHaveLength(1);
+  });
+
+  it("resets a dead-letter review job and re-enqueues it", async () => {
+    const jobStore = new InMemoryReviewJobStore();
+    const reviewQueue = new InMemoryReviewQueue();
+    const app = createApp({
+      settings,
+      store: new InMemoryReviewEventStore(),
+      jobStore,
+      reviewQueue,
+    });
+
+    await postWebhook(app, pullRequestPayload(), "delivery-retry");
+    await jobStore.markRunning("delivery-retry", 3);
+    await jobStore.markFailed("delivery-retry", 3, 3, "provider unavailable");
+
+    const response = await request(app).post("/reviews/delivery-retry/retry");
+    const retried = await jobStore.get("delivery-retry");
+
+    expect(response.statusCode).toBe(202);
+    expect(response.body).toMatchObject({
+      accepted: true,
+      deliveryId: "delivery-retry",
+      job: {
+        deliveryId: "delivery-retry",
+        status: "queued",
+        attempts: 0,
+        maxAttempts: 3,
+      },
+    });
+    expect(response.body.job.lastError).toBeUndefined();
+    expect(retried).toMatchObject({
+      deliveryId: "delivery-retry",
+      status: "queued",
+      attempts: 0,
+    });
+    expect(retried?.lastError).toBeUndefined();
+    expect(retried?.startedAt).toBeUndefined();
+    expect(retried?.failedAt).toBeUndefined();
+    expect(reviewQueue.enqueued.map((job) => job.event.deliveryId)).toEqual([
+      "delivery-retry",
+      "delivery-retry",
+    ]);
+  });
+
+  it("keeps duplicate webhook deliveries idempotent after an operator retry", async () => {
+    const jobStore = new InMemoryReviewJobStore();
+    const reviewQueue = new InMemoryReviewQueue();
+    const app = createApp({
+      settings,
+      store: new InMemoryReviewEventStore(),
+      jobStore,
+      reviewQueue,
+    });
+    const payload = pullRequestPayload();
+
+    await postWebhook(app, payload, "delivery-duplicate-retry");
+    await jobStore.markRunning("delivery-duplicate-retry", 3);
+    await jobStore.markFailed("delivery-duplicate-retry", 3, 3, "provider unavailable");
+    await request(app).post("/reviews/delivery-duplicate-retry/retry");
+    const duplicate = await postWebhook(app, payload, "delivery-duplicate-retry");
+
+    expect(duplicate.statusCode).toBe(200);
+    expect(duplicate.body).toMatchObject({
+      accepted: true,
+      duplicate: true,
+      deliveryId: "delivery-duplicate-retry",
+      job: {
+        status: "queued",
+      },
+    });
+    expect(reviewQueue.enqueued.map((job) => job.event.deliveryId)).toEqual([
+      "delivery-duplicate-retry",
+      "delivery-duplicate-retry",
+    ]);
+  });
+
   it("rejects invalid signatures", async () => {
     const app = createApp({
       settings,

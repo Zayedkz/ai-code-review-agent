@@ -64,6 +64,43 @@ export function createApp(options: CreateAppOptions) {
     return response.json(reviewAuditResponse(stored, job));
   }));
 
+  app.post("/reviews/:deliveryId/retry", asyncHandler(async (request: Request, response: Response) => {
+    const { deliveryId } = request.params;
+    const job = await jobStore.get(deliveryId);
+    if (!job) {
+      return response.status(404).json({ error: "review delivery not found" });
+    }
+    if (job.status !== "dead_letter") {
+      return response.status(409).json({
+        error: "review delivery is not dead-lettered",
+        job: reviewJobResponse(job),
+      });
+    }
+
+    const reset = await jobStore.resetDeadLetterForRetry(deliveryId);
+    if (!reset) {
+      const latest = await jobStore.get(deliveryId);
+      return response.status(409).json({
+        error: "review delivery is not dead-lettered",
+        job: latest ? reviewJobResponse(latest) : undefined,
+      });
+    }
+
+    try {
+      await reviewQueue.reenqueue(reset.event);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "failed to re-enqueue review job";
+      await jobStore.markFailed(deliveryId, reset.maxAttempts, reset.maxAttempts, message);
+      throw error;
+    }
+
+    return response.status(202).json({
+      accepted: true,
+      deliveryId,
+      job: reviewJobResponse(reset),
+    });
+  }));
+
   app.post("/webhooks/github", asyncHandler(async (request: RawBodyRequest, response: Response) => {
     const eventType = request.header("x-github-event");
     const deliveryId = request.header("x-github-delivery");
