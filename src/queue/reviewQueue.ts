@@ -10,12 +10,17 @@ export type ReviewJobPayload = {
 
 export interface ReviewQueue {
   enqueue(event: NormalizedPullRequestEvent): Promise<void>;
+  reenqueue(event: NormalizedPullRequestEvent): Promise<void>;
 }
 
 export class InMemoryReviewQueue implements ReviewQueue {
   readonly enqueued: ReviewJobPayload[] = [];
 
   async enqueue(event: NormalizedPullRequestEvent): Promise<void> {
+    this.enqueued.push({ event });
+  }
+
+  async reenqueue(event: NormalizedPullRequestEvent): Promise<void> {
     this.enqueued.push({ event });
   }
 }
@@ -30,6 +35,19 @@ export class BullMQReviewQueue implements ReviewQueue {
   }
 
   async enqueue(event: NormalizedPullRequestEvent): Promise<void> {
+    await this.add(event);
+  }
+
+  async reenqueue(event: NormalizedPullRequestEvent): Promise<void> {
+    const existing = await this.queue.getJob(event.deliveryId);
+    if (existing) {
+      await existing.remove();
+    }
+
+    await this.add(event);
+  }
+
+  private async add(event: NormalizedPullRequestEvent): Promise<void> {
     const options: JobsOptions = {
       jobId: event.deliveryId,
       attempts: this.maxAttempts,

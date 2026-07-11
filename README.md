@@ -64,6 +64,7 @@ The service stores normalized review jobs and completed deterministic findings i
 
 - `GET /health` returns service status, environment, and stored event count.
 - `GET /reviews/:deliveryId` returns read-only audit details for queued, running, completed, failed, or dead-letter deliveries.
+- `POST /reviews/:deliveryId/retry` resets a dead-letter review job to queued state and re-enqueues it for worker processing.
 - `POST /webhooks/github` accepts signed GitHub `pull_request` events.
 - Unsupported signed GitHub event types return `202` without processing.
 - Duplicate delivery IDs return the existing review or queued job state without creating another job or refetching GitHub diff data.
@@ -198,6 +199,14 @@ curl http://localhost:8080/reviews/local-delivery-id
 
 The audit response includes delivery status, duplicate replay behavior, job attempts, last error if any, repository, pull request number, action, head SHA, and, after worker completion, risk level, findings, and received/updated timestamps.
 
+Retry a dead-letter delivery:
+
+```bash
+curl -X POST http://localhost:8080/reviews/local-delivery-id/retry
+```
+
+The retry endpoint returns `404` for unknown delivery IDs and `409` when the delivery exists but is not in `dead_letter` state. A successful retry clears the last error and terminal timestamps, resets attempts to zero, and enqueues one new worker job for the original normalized pull request event.
+
 ## Environment Variables
 
 | Variable | Purpose | Example |
@@ -236,10 +245,10 @@ Key tradeoffs:
 - Store and queue interfaces keep webhook and worker logic independent from PostgreSQL/Redis details; tests can use an isolated in-memory PostgreSQL adapter.
 - The GitHub file client and installation-token provider are injectable, which keeps worker tests deterministic while exercising production-style GitHub App authentication.
 - Webhook intake is fast and idempotent because review execution runs behind a queue boundary.
+- Operator retries reuse the delivery ID as the queue job ID so retried jobs keep the same audit identity as the original webhook.
 - File retrieval falls back to the PR body when GitHub is unavailable, trading depth for reliable webhook acceptance.
 
 ## Future Improvements
 
 - Add an LLM provider behind the deterministic policy checks.
 - Publish or update a single PR review summary comment per delivery/head SHA.
-- Add an operator retry endpoint for dead-letter review jobs.

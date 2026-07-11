@@ -77,6 +77,37 @@ describe("PostgresReviewJobStore", () => {
       dead_letter: 1,
     });
   });
+
+  it("resets only dead-letter jobs for retry", async () => {
+    const store = await createMemoryBackedJobStore();
+    await store.create(normalizedEvent("queued"), 3);
+    await store.create(normalizedEvent("dead"), 3);
+    await store.markRunning("dead", 3);
+    await store.markFailed("dead", 3, 3, "provider unavailable");
+
+    const queuedReset = await store.resetDeadLetterForRetry("queued");
+    const missingReset = await store.resetDeadLetterForRetry("missing");
+    const deadReset = await store.resetDeadLetterForRetry("dead");
+
+    expect(queuedReset).toBeUndefined();
+    expect(missingReset).toBeUndefined();
+    expect(deadReset).toMatchObject({
+      deliveryId: "dead",
+      status: "queued",
+      attempts: 0,
+      maxAttempts: 3,
+    });
+    expect(deadReset?.lastError).toBeUndefined();
+    expect(deadReset?.startedAt).toBeUndefined();
+    expect(deadReset?.failedAt).toBeUndefined();
+    await expect(store.countByStatus()).resolves.toEqual({
+      queued: 2,
+      running: 0,
+      completed: 0,
+      failed: 0,
+      dead_letter: 0,
+    });
+  });
 });
 
 async function createMemoryBackedJobStore(): Promise<ReviewJobStore> {

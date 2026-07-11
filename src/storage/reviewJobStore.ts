@@ -30,6 +30,7 @@ export interface ReviewJobStore {
   markRunning(deliveryId: string, attempt: number): Promise<ReviewJobRecord>;
   markCompleted(deliveryId: string): Promise<ReviewJobRecord>;
   markFailed(deliveryId: string, attempt: number, maxAttempts: number, error: string): Promise<ReviewJobRecord>;
+  resetDeadLetterForRetry(deliveryId: string): Promise<ReviewJobRecord | undefined>;
   countByStatus(): Promise<Record<ReviewJobStatus, number>>;
 }
 
@@ -111,6 +112,23 @@ export class InMemoryReviewJobStore implements ReviewJobStore {
     });
   }
 
+  async resetDeadLetterForRetry(deliveryId: string): Promise<ReviewJobRecord | undefined> {
+    const existing = this.records.get(deliveryId);
+    if (!existing || existing.status !== "dead_letter") {
+      return undefined;
+    }
+
+    return this.update(deliveryId, {
+      status: "queued",
+      attempts: 0,
+      lastError: undefined,
+      queuedAt: new Date().toISOString(),
+      startedAt: undefined,
+      completedAt: undefined,
+      failedAt: undefined,
+    });
+  }
+
   async countByStatus(): Promise<Record<ReviewJobStatus, number>> {
     const counts = emptyStatusCounts();
     for (const record of this.records.values()) {
@@ -121,7 +139,7 @@ export class InMemoryReviewJobStore implements ReviewJobStore {
 
   private update(
     deliveryId: string,
-    patch: Partial<Omit<ReviewJobRecord, "deliveryId" | "event" | "queuedAt">>,
+    patch: Partial<Omit<ReviewJobRecord, "deliveryId" | "event">>,
   ): ReviewJobRecord {
     const existing = this.records.get(deliveryId);
     if (!existing) {
@@ -228,6 +246,28 @@ export class PostgresReviewJobStore implements ReviewJobStore {
       `,
       [deliveryId, attempt, maxAttempts, attempt >= maxAttempts ? "dead_letter" : "failed", error],
     );
+  }
+
+  async resetDeadLetterForRetry(deliveryId: string): Promise<ReviewJobRecord | undefined> {
+    const result = await this.db.query<ReviewJobRow>(
+      `
+        UPDATE review_jobs
+        SET status = 'queued',
+            attempts = 0,
+            last_error = NULL,
+            queued_at = NOW(),
+            started_at = NULL,
+            completed_at = NULL,
+            failed_at = NULL,
+            updated_at = NOW()
+        WHERE delivery_id = $1
+          AND status = 'dead_letter'
+        RETURNING *
+      `,
+      [deliveryId],
+    );
+    const row = result.rows[0];
+    return row ? rowToReviewJob(row) : undefined;
   }
 
   async countByStatus(): Promise<Record<ReviewJobStatus, number>> {

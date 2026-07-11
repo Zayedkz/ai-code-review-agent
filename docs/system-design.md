@@ -55,11 +55,8 @@ Initial endpoints:
 
 - `GET /health`: service health, persisted event count, and review job counts by state.
 - `GET /reviews/{deliveryId}`: inspect review job status, duplicate replay behavior, repository, PR number, action, head SHA, attempts, last error, and completed findings when available.
+- `POST /reviews/{deliveryId}/retry`: reset a dead-letter review job to queued state and re-enqueue the original normalized pull request event.
 - `POST /webhooks/github`: signed GitHub webhook intake for pull request events.
-
-Planned endpoints:
-
-- `POST /reviews/{deliveryId}/retry`: retry a failed review run.
 
 ## 7. Processing Flow
 
@@ -96,6 +93,7 @@ Schema changes are applied with `npm run migrate`, which executes checked-in `mi
 - Keep file paths when GitHub omits patches for large or binary files.
 - Retry provider failures with bounded BullMQ attempts.
 - Move terminal worker failures into a dead-letter state with last error context.
+- Retry only dead-letter jobs through the operator endpoint, returning `409` for active or completed jobs.
 
 ## 10. Observability
 
@@ -125,7 +123,6 @@ Schema changes are applied with `npm run migrate`, which executes checked-in `mi
 
 ## 13. Future Improvements
 
-- Operator retry endpoint for dead-letter jobs.
 - File-level finding locations.
 - LLM provider abstraction with prompt redaction.
 - PR comment publishing and update-in-place behavior.
