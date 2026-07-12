@@ -38,6 +38,14 @@ describe("ReviewJobProcessor", () => {
     expect(stored?.review.findings.map((finding) => finding.code)).toEqual(
       expect.arrayContaining(["secret-handling-review"]),
     );
+    expect(stored?.review.findings).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          code: "secret-handling-review",
+          locations: [{ path: "src/config.ts" }],
+        }),
+      ]),
+    );
   });
 
   it("marks transient worker failures as failed and rethrows for BullMQ retry", async () => {

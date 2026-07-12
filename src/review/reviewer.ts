@@ -2,11 +2,16 @@ import type { NormalizedPullRequestEvent } from "../github/events.js";
 
 export type ReviewSeverity = "info" | "warning" | "critical";
 
+export type ReviewFindingLocation = {
+  path: string;
+};
+
 export type ReviewFinding = {
   code: string;
   severity: ReviewSeverity;
   message: string;
   recommendation: string;
+  locations?: ReviewFindingLocation[];
 };
 
 export type ReviewSummary = {
@@ -36,30 +41,45 @@ export class DeterministicReviewer {
       });
     }
 
+    const filesWithoutTests = this.nonTestFiles(diff);
     if (!this.hasTestChange(diff)) {
       findings.push({
         code: "missing-test-change",
         severity: "warning",
         message: "No test files were changed in this pull request.",
         recommendation: "Add or update tests that cover the behavior changed by this PR.",
+        locations: filesWithoutTests.length > 0 ? filesWithoutTests : undefined,
       });
     }
 
-    if (this.containsRiskyPattern(diff, ["TODO", "FIXME", "console.log("])) {
+    const debugOrPlaceholderLocations = this.filesMatchingPatterns(diff, [
+      "TODO",
+      "FIXME",
+      "console.log(",
+    ]);
+    if (debugOrPlaceholderLocations.length > 0) {
       findings.push({
         code: "debug-or-placeholder-code",
         severity: "info",
         message: "The diff contains debug output or placeholder markers.",
         recommendation: "Remove temporary debugging and convert placeholders into tracked work.",
+        locations: debugOrPlaceholderLocations,
       });
     }
 
-    if (this.containsRiskyPattern(diff, ["process.env", "secret", "token", "password"])) {
+    const secretHandlingLocations = this.filesMatchingPatterns(diff, [
+      "process.env",
+      "secret",
+      "token",
+      "password",
+    ]);
+    if (secretHandlingLocations.length > 0) {
       findings.push({
         code: "secret-handling-review",
         severity: "critical",
         message: "The diff touches environment variables or secret-like terms.",
         recommendation: "Verify no credentials are committed and secret access is audited.",
+        locations: secretHandlingLocations,
       });
     }
 
@@ -76,9 +96,24 @@ export class DeterministicReviewer {
     return diff.files.some((file) => /(^|\/)(__tests__|tests?)\/|\.test\.|\.spec\./.test(file.path));
   }
 
-  private containsRiskyPattern(diff: PullRequestDiff, patterns: string[]): boolean {
-    const changedText = diff.files.map((file) => file.patch).join("\n").toLowerCase();
-    return patterns.some((pattern) => changedText.includes(pattern.toLowerCase()));
+  private nonTestFiles(diff: PullRequestDiff): ReviewFindingLocation[] {
+    return this.uniqueLocations(
+      diff.files.filter((file) => !/(^|\/)(__tests__|tests?)\/|\.test\.|\.spec\./.test(file.path)),
+    );
+  }
+
+  private filesMatchingPatterns(diff: PullRequestDiff, patterns: string[]): ReviewFindingLocation[] {
+    const normalizedPatterns = patterns.map((pattern) => pattern.toLowerCase());
+    return this.uniqueLocations(
+      diff.files.filter((file) => {
+        const changedText = file.patch.toLowerCase();
+        return normalizedPatterns.some((pattern) => changedText.includes(pattern));
+      }),
+    );
+  }
+
+  private uniqueLocations(files: PullRequestDiff["files"]): ReviewFindingLocation[] {
+    return [...new Set(files.map((file) => file.path))].map((path) => ({ path }));
   }
 
   private riskLevel(findings: ReviewFinding[]): ReviewSummary["riskLevel"] {
