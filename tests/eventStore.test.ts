@@ -112,7 +112,11 @@ describe("webhook persistence", () => {
     });
     expect(audit.body.findings).toEqual(
       expect.arrayContaining([
-        expect.objectContaining({ code: "secret-handling-review", severity: "critical" }),
+        expect.objectContaining({
+          code: "secret-handling-review",
+          severity: "critical",
+          locations: [{ path: "pull-request-description.md" }],
+        }),
       ]),
     );
   });
@@ -187,6 +191,7 @@ function reviewSummary(riskLevel: ReviewSummary["riskLevel"]): ReviewSummary {
         severity: "warning",
         message: "No test files were changed in this pull request.",
         recommendation: "Add or update tests that cover the behavior changed by this PR.",
+        locations: [{ path: "src/app.ts" }],
       },
     ],
   };

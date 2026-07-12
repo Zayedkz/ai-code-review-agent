@@ -15,7 +15,7 @@ This repo focuses on that foundation:
 - changed file and patch retrieval through a GitHub client boundary
 - idempotent queued delivery handling
 - persisted review job state with retry and dead-letter outcomes
-- deterministic review findings
+- deterministic review findings with file-level locations when a rule can identify the changed files involved
 - testable provider boundaries
 - CI-friendly local behavior
 
@@ -56,7 +56,7 @@ The service stores normalized review jobs and completed deterministic findings i
 - Worker entrypoint for independently scaling review execution.
 - Migration runner for applying checked-in SQL migrations.
 - Read-only review audit endpoint for delivery lookup and duplicate replay inspection.
-- Deterministic reviewer with explicit findings, severity, recommendations, and risk levels.
+- Deterministic reviewer with explicit findings, severity, recommendations, risk levels, and optional file-level locations.
 - Tests covering signature verification, webhook behavior, duplicate handling, audit lookup, migration execution, health checks, and reviewer rules.
 - Lint, typecheck, and test scripts ready for CI.
 
@@ -79,6 +79,7 @@ The service stores normalized review jobs and completed deterministic findings i
   - missing test changes
   - debug or placeholder markers
   - secret-handling patterns
+- File-attributable findings include `locations` entries with changed file paths so audit output and future PR comments can point reviewers at the relevant files.
 - Docker Compose includes PostgreSQL and Redis for the persistent/queued path.
 
 ## Tech Stack
@@ -197,7 +198,7 @@ Inspect a stored delivery:
 curl http://localhost:8080/reviews/local-delivery-id
 ```
 
-The audit response includes delivery status, duplicate replay behavior, job attempts, last error if any, repository, pull request number, action, head SHA, and, after worker completion, risk level, findings, and received/updated timestamps.
+The audit response includes delivery status, duplicate replay behavior, job attempts, last error if any, repository, pull request number, action, head SHA, and, after worker completion, risk level, findings, optional finding locations, and received/updated timestamps.
 
 Retry a dead-letter delivery:
 

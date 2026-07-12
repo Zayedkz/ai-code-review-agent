@@ -6,7 +6,7 @@
 - Normalize and enqueue review events idempotently.
 - Retrieve changed pull request file paths and patches from GitHub.
 - Analyze pull request metadata and fetched diffs for risk signals.
-- Produce actionable summaries, findings, and recommendations.
+- Produce actionable summaries, findings, recommendations, and file-level locations when available.
 - Publish review output back to GitHub once comment publishing is connected.
 
 ## 2. Non-Goals
@@ -33,7 +33,7 @@
 
 - Webhook response latency should stay low enough for GitHub delivery expectations.
 - Event processing should be idempotent.
-- Review outputs should be auditable and reproducible.
+- Review outputs should be auditable, reproducible, and specific enough to guide reviewers to changed files.
 - Provider failures should not create duplicate comments.
 - Secrets and proprietary diffs should not be logged by default.
 
@@ -67,7 +67,7 @@ Initial endpoints:
 5. API creates durable `review_jobs` state and enqueues a BullMQ job keyed by delivery ID.
 6. Worker claims the job, marks it running, and mints a short-lived GitHub App installation token for the webhook installation ID.
 7. Worker retrieves changed pull request files from GitHub's PR files endpoint with the installation token.
-8. Deterministic reviewer providers generate findings and a summary from real file paths and available patches.
+8. Deterministic reviewer providers generate findings, optional file-level locations, and a summary from real file paths and available patches.
 9. Worker stores the normalized event and review result idempotently by delivery ID, then marks the job completed.
 10. Future publisher writes a single idempotent PR summary comment.
 
@@ -99,7 +99,7 @@ Schema changes are applied with `npm run migrate`, which executes checked-in `mi
 
 - Structured logs for delivery ID, repository, PR number, action, and result.
 - Metrics for webhook latency, queue depth, review latency, provider failures, and publish failures.
-- Read-only audit lookup for review deliveries, including queue state, attempts, replay behavior, and generated findings.
+- Read-only audit lookup for review deliveries, including queue state, attempts, replay behavior, generated findings, and file-level finding locations when present.
 - Future audit trail for published comments.
 - Redacted traces across webhook, queue, GitHub API, and provider calls.
 
@@ -123,6 +123,6 @@ Schema changes are applied with `npm run migrate`, which executes checked-in `mi
 
 ## 13. Future Improvements
 
-- File-level finding locations.
+- Line-level finding locations for comment publishing.
 - LLM provider abstraction with prompt redaction.
 - PR comment publishing and update-in-place behavior.
