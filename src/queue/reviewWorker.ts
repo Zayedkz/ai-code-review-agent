@@ -7,7 +7,9 @@ import {
   type PullRequestFileClient,
 } from "../github/client.js";
 import type { NormalizedPullRequestEvent } from "../github/events.js";
-import { DeterministicReviewer, type PullRequestDiff } from "../review/reviewer.js";
+import { createReviewProvider, type ReviewProvider } from "../review/providers.js";
+import { redactPullRequestDiff, redactReviewEvent } from "../review/redaction.js";
+import type { PullRequestDiff } from "../review/reviewer.js";
 import {
   createPostgresReviewEventStore,
   type ReviewEventStore,
@@ -22,25 +24,25 @@ import { reviewQueueName, type ReviewJobPayload } from "./reviewQueue.js";
 export type ReviewJobProcessorOptions = {
   eventStore: ReviewEventStore;
   jobStore: ReviewJobStore;
-  reviewer?: DeterministicReviewer;
+  reviewer?: ReviewProvider;
   pullRequestFileClient?: PullRequestFileClient;
   maxAttempts?: number;
 };
 
 export class ReviewJobProcessor {
-  private readonly reviewer: DeterministicReviewer;
+  private readonly reviewer: ReviewProvider;
   private readonly maxAttempts: number;
 
   constructor(private readonly options: ReviewJobProcessorOptions) {
-    this.reviewer = options.reviewer ?? new DeterministicReviewer();
+    this.reviewer = options.reviewer ?? createReviewProvider("deterministic");
     this.maxAttempts = options.maxAttempts ?? 3;
   }
 
   async process(payload: ReviewJobPayload, attempt = 1): Promise<ReviewJobRecord> {
     await this.options.jobStore.markRunning(payload.event.deliveryId, attempt);
     try {
-      const diff = await extractDiff(payload.event, this.options.pullRequestFileClient);
-      const review = this.reviewer.review(payload.event, diff);
+      const diff = redactPullRequestDiff(await extractDiff(payload.event, this.options.pullRequestFileClient));
+      const review = await this.reviewer.review(redactReviewEvent(payload.event), diff);
       await this.options.eventStore.save(payload.event, review);
       return await this.options.jobStore.markCompleted(payload.event.deliveryId);
     } catch (error) {
@@ -67,6 +69,7 @@ export function createBullMQReviewWorker(settings: Settings): Worker<ReviewJobPa
       installationTokenProvider: createGitHubInstallationTokenProvider(settings),
       apiBaseUrl: settings.githubApiBaseUrl,
     }),
+    reviewer: createReviewProvider(settings.llmProvider),
     maxAttempts: settings.reviewJobMaxAttempts,
   });
 

@@ -25,7 +25,8 @@
 - Run review work through Redis/BullMQ with bounded retry.
 - Mint scoped GitHub App installation tokens for changed file metadata and patch retrieval.
 - Fetch changed file metadata and patches through a GitHub client boundary.
-- Generate review findings from deterministic local rules.
+- Generate review findings through a provider boundary, with deterministic local rules as the default.
+- Redact likely secrets before diff text or pull request body text crosses a provider boundary.
 - Expose stored delivery audit details through a read-only endpoint.
 - Support future async processing with retry and dead-letter behavior.
 
@@ -67,11 +68,12 @@ Initial endpoints:
 5. API creates durable `review_jobs` state and enqueues a BullMQ job keyed by delivery ID.
 6. Worker claims the job, marks it running, and mints a short-lived GitHub App installation token for the webhook installation ID.
 7. Worker retrieves changed pull request files from GitHub's PR files endpoint with the installation token.
-8. Deterministic reviewer providers generate findings, optional file-level locations, and a summary from real file paths and available patches.
-9. Worker stores the normalized event and review result idempotently by delivery ID, then marks the job completed.
-10. Future publisher writes a single idempotent PR summary comment.
+8. Worker redacts likely secrets from fetched patches and pull request body fallback text.
+9. The selected review provider generates findings, optional file-level locations, and a summary from real file paths and redacted prompt text.
+10. Worker stores the normalized event and review result idempotently by delivery ID, then marks the job completed.
+11. Future publisher writes a single idempotent PR summary comment.
 
-The current implementation keeps webhook intake queue-first, mints GitHub App installation tokens through an injectable provider in the worker, fetches PR files through an injectable GitHub client, stores review jobs and completed review events in PostgreSQL, and uses BullMQ for Redis-backed retry. Tests exercise the same store contracts through isolated in-memory PostgreSQL adapters, while route and worker tests inject in-memory queue/store implementations for dependency-free API behavior.
+The current implementation keeps webhook intake queue-first, mints GitHub App installation tokens through an injectable provider in the worker, fetches PR files through an injectable GitHub client, stores review jobs and completed review events in PostgreSQL, and uses BullMQ for Redis-backed retry. Review generation runs behind a provider interface selected by `LLM_PROVIDER`, defaulting to deterministic local rules; `mock` and `local` run a CI-safe local provider path without external API calls. Tests exercise the same store contracts through isolated in-memory PostgreSQL adapters, while route and worker tests inject in-memory queue/store implementations for dependency-free API behavior.
 
 Schema changes are applied with `npm run migrate`, which executes checked-in `migrations/*.sql` files in filename order using `DATABASE_URL`. The current migrations create the durable `review_events` audit table, `review_jobs` run-state table, and supporting lookup indexes.
 
@@ -110,7 +112,7 @@ Schema changes are applied with `npm run migrate`, which executes checked-in `mi
 - Load GitHub App credentials from environment variables or mounted private-key files, never checked-in files.
 - Mint short-lived installation access tokens per webhook installation instead of storing long-lived GitHub API tokens.
 - Avoid logging raw diffs by default.
-- Redact likely credentials before provider calls.
+- Redact likely credentials before provider calls, including patch text and pull request body fallback text.
 - Scope GitHub App permissions to pull requests read access for PR file retrieval, adding contents read or pull request write only when later features require them.
 
 ## 12. Tradeoffs
@@ -124,5 +126,5 @@ Schema changes are applied with `npm run migrate`, which executes checked-in `mi
 ## 13. Future Improvements
 
 - Line-level finding locations for comment publishing.
-- LLM provider abstraction with prompt redaction.
+- Real hosted LLM provider integration behind the redacted provider boundary.
 - PR comment publishing and update-in-place behavior.

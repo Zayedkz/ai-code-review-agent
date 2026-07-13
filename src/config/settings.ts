@@ -13,7 +13,7 @@ const settingsSchema = z.object({
   redisUrl: z.string().default("redis://localhost:6379/0"),
   reviewJobMaxAttempts: z.coerce.number().int().positive().default(3),
   reviewWorkerConcurrency: z.coerce.number().int().positive().default(2),
-  llmProvider: z.string().default("mock"),
+  llmProvider: z.enum(["deterministic", "mock", "local"]).default("deterministic"),
 });
 
 export type Settings = z.infer<typeof settingsSchema>;

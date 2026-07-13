@@ -1,4 +1,5 @@
 import type { NormalizedPullRequestEvent } from "../github/events.js";
+import type { ReviewProvider, ReviewProviderName } from "./providers.js";
 
 export type ReviewSeverity = "info" | "warning" | "critical";
 
@@ -15,7 +16,7 @@ export type ReviewFinding = {
 };
 
 export type ReviewSummary = {
-  provider: "deterministic";
+  provider: ReviewProviderName;
   riskLevel: "low" | "medium" | "high";
   summary: string;
   findings: ReviewFinding[];
@@ -28,7 +29,9 @@ export type PullRequestDiff = {
   }>;
 };
 
-export class DeterministicReviewer {
+export class DeterministicReviewer implements ReviewProvider {
+  readonly name = "deterministic";
+
   review(event: NormalizedPullRequestEvent, diff: PullRequestDiff = { files: [] }): ReviewSummary {
     const findings: ReviewFinding[] = [];
 
