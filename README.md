@@ -1,6 +1,6 @@
 # AI Code Review Agent
 
-GitHub webhook service for automated pull request triage. It verifies signed GitHub webhook deliveries, normalizes pull request events, enqueues idempotent review jobs, and uses a worker to fetch changed pull request files and persist deterministic review findings that flag risky change patterns.
+GitHub webhook service for automated pull request triage. It verifies signed GitHub webhook deliveries, normalizes pull request events, enqueues idempotent review jobs, and uses a worker to fetch changed pull request files, redact prompt inputs, and persist review findings that flag risky change patterns.
 
 This project is built as a developer productivity portfolio piece. It demonstrates the backend foundation for a code review agent before layering in queue-backed review jobs, comment publishing, and LLM review providers.
 
@@ -16,7 +16,8 @@ This repo focuses on that foundation:
 - idempotent queued delivery handling
 - persisted review job state with retry and dead-letter outcomes
 - deterministic review findings with file-level locations when a rule can identify the changed files involved
-- testable provider boundaries
+- testable review provider boundaries with local/mock provider selection
+- prompt redaction before diff text or pull request body text reaches a provider
 - CI-friendly local behavior
 
 ## Architecture
@@ -32,7 +33,8 @@ flowchart LR
     Queue --> Worker[Review Worker]
     Worker --> GitHubAuth[GitHub App Installation Token]
     GitHubAuth --> GitHubFiles[GitHub PR Files API]
-    GitHubFiles --> Reviewer[Deterministic Reviewer]
+    GitHubFiles --> Redaction[Prompt Redaction]
+    Redaction --> Reviewer[Review Provider]
     Reviewer --> Store[PostgreSQL Review Event Store]
     Reviewer --> Findings[Risk Level + Findings]
     Jobs --> Response[Accepted / Duplicate Response]
@@ -40,7 +42,7 @@ flowchart LR
     Findings --> Audit
 ```
 
-The service stores normalized review jobs and completed deterministic findings in PostgreSQL with GitHub delivery IDs as the idempotency key. Webhook intake creates or reuses durable job state and enqueues BullMQ work, while the worker owns GitHub file retrieval, deterministic review execution, completion marking, and dead-letter state after bounded retries.
+The service stores normalized review jobs and completed review findings in PostgreSQL with GitHub delivery IDs as the idempotency key. Webhook intake creates or reuses durable job state and enqueues BullMQ work, while the worker owns GitHub file retrieval, prompt redaction, provider execution, completion marking, and dead-letter state after bounded retries.
 
 ## What Reviewers Should Notice
 
@@ -56,6 +58,8 @@ The service stores normalized review jobs and completed deterministic findings i
 - Worker entrypoint for independently scaling review execution.
 - Migration runner for applying checked-in SQL migrations.
 - Read-only review audit endpoint for delivery lookup and duplicate replay inspection.
+- Review provider abstraction with deterministic default behavior plus local/mock provider modes for CI-safe development.
+- Prompt redaction for likely secrets before diff or pull request body text crosses the provider boundary.
 - Deterministic reviewer with explicit findings, severity, recommendations, risk levels, and optional file-level locations.
 - Tests covering signature verification, webhook behavior, duplicate handling, audit lookup, migration execution, health checks, and reviewer rules.
 - Lint, typecheck, and test scripts ready for CI.
@@ -74,6 +78,8 @@ The service stores normalized review jobs and completed deterministic findings i
 - The worker mints a scoped GitHub App installation token before fetching changed pull request file paths and patches from GitHub.
 - If GitHub omits a patch for a large or binary file, the file path is still included with an empty patch.
 - If token minting, file retrieval, or empty file responses fail, review falls back to the pull request body so webhook intake remains resilient.
+- Before provider execution, the worker redacts likely credentials from fetched patches and pull request body fallback text.
+- `LLM_PROVIDER=deterministic` is the default; `mock` and `local` run a CI-safe local provider path without external API calls.
 - Review rules flag:
   - large change sets
   - missing test changes
@@ -102,7 +108,7 @@ The service stores normalized review jobs and completed deterministic findings i
 src/http/             Express app and webhook route wiring
 src/github/           GitHub signature verification, event normalization, and PR file client
 src/queue/            BullMQ queue adapter and review worker processor
-src/review/           Deterministic review provider and finding model
+src/review/           Review providers, prompt redaction, and finding model
 migrations/           SQL schema for persisted review events and review jobs
 src/storage/          Review event/job store interfaces, PostgreSQL, and in-memory implementations
 src/config/           Environment-driven settings
@@ -224,7 +230,7 @@ The retry endpoint returns `404` for unknown delivery IDs and `409` when the del
 | `REDIS_URL` | Redis connection string for BullMQ review jobs | `redis://localhost:6379/0` |
 | `REVIEW_JOB_MAX_ATTEMPTS` | Maximum worker attempts before a job enters dead-letter state | `3` |
 | `REVIEW_WORKER_CONCURRENCY` | Number of BullMQ review jobs processed concurrently by one worker | `2` |
-| `LLM_PROVIDER` | Reserved review provider selector | `mock` |
+| `LLM_PROVIDER` | Review provider selector: `deterministic`, `mock`, or `local` | `deterministic` |
 
 The GitHub App needs read-only `Pull requests` permission to list pull request files. If private repository file metadata or future source-content reads are needed, add read-only `Contents` permission. Future comment publishing should add `Pull requests: Read and write` only when that feature is implemented.
 
@@ -242,7 +248,7 @@ More detail is available in [docs/system-design.md](docs/system-design.md).
 
 Key tradeoffs:
 
-- Deterministic rules are less flexible than LLM review, but they make behavior auditable and reproducible.
+- Deterministic rules are less flexible than LLM review, but they make behavior auditable and reproducible. The mock/local provider modes exercise the provider boundary without paid API calls.
 - Store and queue interfaces keep webhook and worker logic independent from PostgreSQL/Redis details; tests can use an isolated in-memory PostgreSQL adapter.
 - The GitHub file client and installation-token provider are injectable, which keeps worker tests deterministic while exercising production-style GitHub App authentication.
 - Webhook intake is fast and idempotent because review execution runs behind a queue boundary.
@@ -251,5 +257,5 @@ Key tradeoffs:
 
 ## Future Improvements
 
-- Add an LLM provider behind the deterministic policy checks.
+- Add a real hosted LLM provider behind the redacted provider boundary.
 - Publish or update a single PR review summary comment per delivery/head SHA.

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type { NormalizedPullRequestEvent } from "../src/github/events.js";
 import { ReviewJobProcessor } from "../src/queue/reviewWorker.js";
+import type { ReviewProvider } from "../src/review/providers.js";
 import { DeterministicReviewer } from "../src/review/reviewer.js";
 import { InMemoryReviewEventStore } from "../src/storage/eventStore.js";
 import { InMemoryReviewJobStore } from "../src/storage/reviewJobStore.js";
@@ -93,11 +94,56 @@ describe("ReviewJobProcessor", () => {
     });
     await expect(eventStore.count()).resolves.toBe(0);
   });
+
+  it("redacts diff and pull request body text before provider review", async () => {
+    const eventStore = new InMemoryReviewEventStore();
+    const jobStore = new InMemoryReviewJobStore();
+    const event = normalizedEvent("delivery-redaction");
+    await jobStore.create(event, 3);
+
+    const reviewer = new RecordingReviewer();
+    const processor = new ReviewJobProcessor({
+      eventStore,
+      jobStore,
+      reviewer,
+      pullRequestFileClient: {
+        fetchPullRequestDiff: async () => ({
+          files: [
+            {
+              path: "src/config.ts",
+              patch: "+ const token = 'ghp_123456789012345678901234567890123456';",
+            },
+          ],
+        }),
+      },
+      maxAttempts: 3,
+    });
+
+    await processor.process({ event }, 1);
+
+    expect(reviewer.receivedPatch).not.toContain("ghp_123456789012345678901234567890123456");
+    expect(reviewer.receivedPatch).toContain("[REDACTED]");
+    expect(reviewer.receivedBody).not.toContain("GITHUB_TOKEN");
+    const stored = await eventStore.get("delivery-redaction");
+    expect(stored?.event.body).toContain("GITHUB_TOKEN");
+  });
 });
 
 class FailingReviewer extends DeterministicReviewer {
   override review(): never {
     throw new Error("provider unavailable");
+  }
+}
+
+class RecordingReviewer implements ReviewProvider {
+  readonly name = "deterministic";
+  receivedPatch = "";
+  receivedBody: string | null = null;
+
+  review(event: NormalizedPullRequestEvent, diff: Parameters<ReviewProvider["review"]>[1]) {
+    this.receivedPatch = diff.files[0]?.patch ?? "";
+    this.receivedBody = event.body;
+    return new DeterministicReviewer().review(event, diff);
   }
 }
 
