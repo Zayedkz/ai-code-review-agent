@@ -1,6 +1,6 @@
 # AI Code Review Agent
 
-GitHub webhook service for automated pull request triage. It verifies signed GitHub webhook deliveries, normalizes pull request events, enqueues idempotent review jobs, and uses a worker to fetch changed pull request files, redact prompt inputs, and persist review findings that flag risky change patterns.
+GitHub webhook service for automated pull request triage. It verifies signed GitHub webhook deliveries, normalizes pull request events, enqueues idempotent review jobs, and uses a worker to fetch changed pull request files, redact prompt inputs, persist review findings that flag risky change patterns, and optionally publish an idempotent PR summary comment.
 
 This project is built as a developer productivity portfolio piece. It demonstrates the backend foundation for a code review agent before layering in queue-backed review jobs, comment publishing, and LLM review providers.
 
@@ -12,7 +12,7 @@ This repo focuses on that foundation:
 
 - secure GitHub webhook verification
 - pull request payload validation and normalization
-- changed file and patch retrieval through a GitHub client boundary
+- changed file, patch retrieval, and optional PR comment publishing through a GitHub client boundary
 - idempotent queued delivery handling
 - persisted review job state with retry and dead-letter outcomes
 - deterministic review findings with file-level locations when a rule can identify the changed files involved
@@ -37,12 +37,13 @@ flowchart LR
     Redaction --> Reviewer[Review Provider]
     Reviewer --> Store[PostgreSQL Review Event Store]
     Reviewer --> Findings[Risk Level + Findings]
+    Reviewer --> Comment[Optional Managed PR Comment]
     Jobs --> Response[Accepted / Duplicate Response]
     Store --> Audit[Review Audit Endpoint]
     Findings --> Audit
 ```
 
-The service stores normalized review jobs and completed review findings in PostgreSQL with GitHub delivery IDs as the idempotency key. Webhook intake creates or reuses durable job state and enqueues BullMQ work, while the worker owns GitHub file retrieval, prompt redaction, provider execution, completion marking, and dead-letter state after bounded retries.
+The service stores normalized review jobs and completed review findings in PostgreSQL with GitHub delivery IDs as the idempotency key. Webhook intake creates or reuses durable job state and enqueues BullMQ work, while the worker owns GitHub file retrieval, prompt redaction, provider execution, optional summary comment publishing, completion marking, and dead-letter state after bounded retries.
 
 ## What Reviewers Should Notice
 
@@ -52,6 +53,7 @@ The service stores normalized review jobs and completed review findings in Postg
 - Zod schema validation for pull request webhook payloads.
 - Normalized internal event model separate from GitHub's raw payload shape.
 - GitHub PR files client boundary that retrieves changed paths and patches with scoped GitHub App installation tokens.
+- Optional managed PR summary comments that create or update one bot comment per delivery/head SHA.
 - Idempotent job and event stores keyed by GitHub delivery ID.
 - PostgreSQL-backed review event persistence with a SQL migration.
 - Redis/BullMQ review queue boundary with persisted job state and dead-letter outcomes.
@@ -79,6 +81,8 @@ The service stores normalized review jobs and completed review findings in Postg
 - If GitHub omits a patch for a large or binary file, the file path is still included with an empty patch.
 - If token minting, file retrieval, or empty file responses fail, review falls back to the pull request body so webhook intake remains resilient.
 - Before provider execution, the worker redacts likely credentials from fetched patches and pull request body fallback text.
+- When `PUBLISH_REVIEW_COMMENTS=true`, the worker publishes a managed PR summary comment after saving the review.
+- Managed PR comments include a hidden delivery/head SHA marker and are updated in place on retry instead of duplicated.
 - `LLM_PROVIDER=deterministic` is the default; `mock` and `local` run a CI-safe local provider path without external API calls.
 - Review rules flag:
   - large change sets
@@ -231,8 +235,9 @@ The retry endpoint returns `404` for unknown delivery IDs and `409` when the del
 | `REVIEW_JOB_MAX_ATTEMPTS` | Maximum worker attempts before a job enters dead-letter state | `3` |
 | `REVIEW_WORKER_CONCURRENCY` | Number of BullMQ review jobs processed concurrently by one worker | `2` |
 | `LLM_PROVIDER` | Review provider selector: `deterministic`, `mock`, or `local` | `deterministic` |
+| `PUBLISH_REVIEW_COMMENTS` | Opt-in flag for creating/updating managed PR summary comments | `false` |
 
-The GitHub App needs read-only `Pull requests` permission to list pull request files. If private repository file metadata or future source-content reads are needed, add read-only `Contents` permission. Future comment publishing should add `Pull requests: Read and write` only when that feature is implemented.
+The GitHub App needs read-only `Pull requests` permission to list pull request files. If private repository file metadata or future source-content reads are needed, add read-only `Contents` permission. Before setting `PUBLISH_REVIEW_COMMENTS=true`, grant either `Pull requests: Read and write` or `Issues: Read and write` so the worker can list, create, and update PR conversation comments through GitHub's issue comments API.
 
 ## Testing
 
@@ -250,7 +255,7 @@ Key tradeoffs:
 
 - Deterministic rules are less flexible than LLM review, but they make behavior auditable and reproducible. The mock/local provider modes exercise the provider boundary without paid API calls.
 - Store and queue interfaces keep webhook and worker logic independent from PostgreSQL/Redis details; tests can use an isolated in-memory PostgreSQL adapter.
-- The GitHub file client and installation-token provider are injectable, which keeps worker tests deterministic while exercising production-style GitHub App authentication.
+- The GitHub file/comment client and installation-token provider are injectable, which keeps worker tests deterministic while exercising production-style GitHub App authentication.
 - Webhook intake is fast and idempotent because review execution runs behind a queue boundary.
 - Operator retries reuse the delivery ID as the queue job ID so retried jobs keep the same audit identity as the original webhook.
 - File retrieval falls back to the PR body when GitHub is unavailable, trading depth for reliable webhook acceptance.
@@ -258,4 +263,4 @@ Key tradeoffs:
 ## Future Improvements
 
 - Add a real hosted LLM provider behind the redacted provider boundary.
-- Publish or update a single PR review summary comment per delivery/head SHA.
+- Persist published comment metadata for a durable publishing audit trail.

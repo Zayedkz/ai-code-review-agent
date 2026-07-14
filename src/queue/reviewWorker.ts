@@ -5,6 +5,7 @@ import { createGitHubInstallationTokenProvider } from "../github/auth.js";
 import {
   GitHubPullRequestFileClient,
   type PullRequestFileClient,
+  type PullRequestReviewCommentClient,
 } from "../github/client.js";
 import type { NormalizedPullRequestEvent } from "../github/events.js";
 import { createReviewProvider, type ReviewProvider } from "../review/providers.js";
@@ -26,6 +27,7 @@ export type ReviewJobProcessorOptions = {
   jobStore: ReviewJobStore;
   reviewer?: ReviewProvider;
   pullRequestFileClient?: PullRequestFileClient;
+  pullRequestReviewCommentClient?: PullRequestReviewCommentClient;
   maxAttempts?: number;
 };
 
@@ -44,6 +46,7 @@ export class ReviewJobProcessor {
       const diff = redactPullRequestDiff(await extractDiff(payload.event, this.options.pullRequestFileClient));
       const review = await this.reviewer.review(redactReviewEvent(payload.event), diff);
       await this.options.eventStore.save(payload.event, review);
+      await this.options.pullRequestReviewCommentClient?.publishReviewSummaryComment(payload.event, review);
       return await this.options.jobStore.markCompleted(payload.event.deliveryId);
     } catch (error) {
       const message = error instanceof Error ? error.message : "unknown review job failure";
@@ -62,13 +65,15 @@ export class ReviewJobProcessor {
 }
 
 export function createBullMQReviewWorker(settings: Settings): Worker<ReviewJobPayload> {
+  const githubClient = new GitHubPullRequestFileClient({
+    installationTokenProvider: createGitHubInstallationTokenProvider(settings),
+    apiBaseUrl: settings.githubApiBaseUrl,
+  });
   const processor = new ReviewJobProcessor({
     eventStore: createPostgresReviewEventStore(settings.databaseUrl),
     jobStore: createPostgresReviewJobStore(settings.databaseUrl),
-    pullRequestFileClient: new GitHubPullRequestFileClient({
-      installationTokenProvider: createGitHubInstallationTokenProvider(settings),
-      apiBaseUrl: settings.githubApiBaseUrl,
-    }),
+    pullRequestFileClient: githubClient,
+    pullRequestReviewCommentClient: settings.publishReviewComments ? githubClient : undefined,
     reviewer: createReviewProvider(settings.llmProvider),
     maxAttempts: settings.reviewJobMaxAttempts,
   });

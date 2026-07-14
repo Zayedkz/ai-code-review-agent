@@ -7,7 +7,7 @@
 - Retrieve changed pull request file paths and patches from GitHub.
 - Analyze pull request metadata and fetched diffs for risk signals.
 - Produce actionable summaries, findings, recommendations, and file-level locations when available.
-- Publish review output back to GitHub once comment publishing is connected.
+- Publish review output back to GitHub through an opt-in managed PR summary comment.
 
 ## 2. Non-Goals
 
@@ -27,6 +27,7 @@
 - Fetch changed file metadata and patches through a GitHub client boundary.
 - Generate review findings through a provider boundary, with deterministic local rules as the default.
 - Redact likely secrets before diff text or pull request body text crosses a provider boundary.
+- When enabled, create or update one managed PR summary comment per delivery/head SHA.
 - Expose stored delivery audit details through a read-only endpoint.
 - Support future async processing with retry and dead-letter behavior.
 
@@ -35,7 +36,7 @@
 - Webhook response latency should stay low enough for GitHub delivery expectations.
 - Event processing should be idempotent.
 - Review outputs should be auditable, reproducible, and specific enough to guide reviewers to changed files.
-- Provider failures should not create duplicate comments.
+- Provider or publisher failures should not create duplicate comments.
 - Secrets and proprietary diffs should not be logged by default.
 
 ## 5. Data Model
@@ -70,10 +71,11 @@ Initial endpoints:
 7. Worker retrieves changed pull request files from GitHub's PR files endpoint with the installation token.
 8. Worker redacts likely secrets from fetched patches and pull request body fallback text.
 9. The selected review provider generates findings, optional file-level locations, and a summary from real file paths and redacted prompt text.
-10. Worker stores the normalized event and review result idempotently by delivery ID, then marks the job completed.
-11. Future publisher writes a single idempotent PR summary comment.
+10. Worker stores the normalized event and review result idempotently by delivery ID.
+11. If `PUBLISH_REVIEW_COMMENTS=true`, worker lists PR comments, finds the hidden marker for the delivery/head SHA, and updates that comment or creates a new managed summary comment.
+12. Worker marks the job completed after persistence and any enabled publishing finish successfully.
 
-The current implementation keeps webhook intake queue-first, mints GitHub App installation tokens through an injectable provider in the worker, fetches PR files through an injectable GitHub client, stores review jobs and completed review events in PostgreSQL, and uses BullMQ for Redis-backed retry. Review generation runs behind a provider interface selected by `LLM_PROVIDER`, defaulting to deterministic local rules; `mock` and `local` run a CI-safe local provider path without external API calls. Tests exercise the same store contracts through isolated in-memory PostgreSQL adapters, while route and worker tests inject in-memory queue/store implementations for dependency-free API behavior.
+The current implementation keeps webhook intake queue-first, mints GitHub App installation tokens through an injectable provider in the worker, fetches PR files and optionally publishes PR comments through an injectable GitHub client, stores review jobs and completed review events in PostgreSQL, and uses BullMQ for Redis-backed retry. Review generation runs behind a provider interface selected by `LLM_PROVIDER`, defaulting to deterministic local rules; `mock` and `local` run a CI-safe local provider path without external API calls. Tests exercise the same store contracts through isolated in-memory PostgreSQL adapters, while route and worker tests inject in-memory queue/store/comment implementations for dependency-free API behavior.
 
 Schema changes are applied with `npm run migrate`, which executes checked-in `migrations/*.sql` files in filename order using `DATABASE_URL`. The current migrations create the durable `review_events` audit table, `review_jobs` run-state table, and supporting lookup indexes.
 
@@ -94,6 +96,7 @@ Schema changes are applied with `npm run migrate`, which executes checked-in `mi
 - Fall back to pull request body text when GitHub App token minting, file retrieval, or empty file responses fail.
 - Keep file paths when GitHub omits patches for large or binary files.
 - Retry provider failures with bounded BullMQ attempts.
+- Retry managed comment lookup, creation, or update failures with the same bounded worker attempts.
 - Move terminal worker failures into a dead-letter state with last error context.
 - Retry only dead-letter jobs through the operator endpoint, returning `409` for active or completed jobs.
 
@@ -102,7 +105,7 @@ Schema changes are applied with `npm run migrate`, which executes checked-in `mi
 - Structured logs for delivery ID, repository, PR number, action, and result.
 - Metrics for webhook latency, queue depth, review latency, provider failures, and publish failures.
 - Read-only audit lookup for review deliveries, including queue state, attempts, replay behavior, generated findings, and file-level finding locations when present.
-- Future audit trail for published comments.
+- Future durable audit trail for published comment IDs and body hashes.
 - Redacted traces across webhook, queue, GitHub API, and provider calls.
 
 ## 11. Security
@@ -113,7 +116,8 @@ Schema changes are applied with `npm run migrate`, which executes checked-in `mi
 - Mint short-lived installation access tokens per webhook installation instead of storing long-lived GitHub API tokens.
 - Avoid logging raw diffs by default.
 - Redact likely credentials before provider calls, including patch text and pull request body fallback text.
-- Scope GitHub App permissions to pull requests read access for PR file retrieval, adding contents read or pull request write only when later features require them.
+- Scope GitHub App permissions to pull requests read access for PR file retrieval, adding contents read only when source-content reads are needed.
+- Keep `PUBLISH_REVIEW_COMMENTS=false` until the GitHub App has either `Pull requests: Read and write` or `Issues: Read and write`; enabling it lets the worker list, create, and update PR conversation comments through GitHub's issue comments API.
 
 ## 12. Tradeoffs
 
@@ -122,9 +126,10 @@ Schema changes are applied with `npm run migrate`, which executes checked-in `mi
 - Queue-backed review work keeps GitHub webhook intake fast and lets workers scale independently, at the cost of operating Redis and a separate worker process.
 - PostgreSQL gives durable replay/audit behavior; the explicit store interface keeps local tests and future queue workers from depending on Express route internals.
 - Fetching files in the worker improves review quality, while a fallback path keeps review completion resilient when GitHub API calls fail.
+- Comment publishing is opt-in because it writes back to GitHub and depends on broader app permissions; tests inject a mocked publisher so CI remains deterministic.
 
 ## 13. Future Improvements
 
-- Line-level finding locations for comment publishing.
+- Line-level finding locations for richer comment publishing.
 - Real hosted LLM provider integration behind the redacted provider boundary.
-- PR comment publishing and update-in-place behavior.
+- Persisted published comment audit records.

@@ -14,6 +14,10 @@ const settingsSchema = z.object({
   reviewJobMaxAttempts: z.coerce.number().int().positive().default(3),
   reviewWorkerConcurrency: z.coerce.number().int().positive().default(2),
   llmProvider: z.enum(["deterministic", "mock", "local"]).default("deterministic"),
+  publishReviewComments: z
+    .enum(["true", "false"])
+    .default("false")
+    .transform((value) => value === "true"),
 });
 
 export type Settings = z.infer<typeof settingsSchema>;
@@ -33,5 +37,6 @@ export function loadSettings(env: NodeJS.ProcessEnv = process.env): Settings {
     reviewJobMaxAttempts: env.REVIEW_JOB_MAX_ATTEMPTS,
     reviewWorkerConcurrency: env.REVIEW_WORKER_CONCURRENCY,
     llmProvider: env.LLM_PROVIDER,
+    publishReviewComments: env.PUBLISH_REVIEW_COMMENTS,
   });
 }
