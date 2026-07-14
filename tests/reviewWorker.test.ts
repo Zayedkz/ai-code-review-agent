@@ -127,6 +127,63 @@ describe("ReviewJobProcessor", () => {
     const stored = await eventStore.get("delivery-redaction");
     expect(stored?.event.body).toContain("GITHUB_TOKEN");
   });
+
+  it("publishes a review summary comment after persisting the review", async () => {
+    const eventStore = new InMemoryReviewEventStore();
+    const jobStore = new InMemoryReviewJobStore();
+    const event = normalizedEvent("delivery-comment");
+    const published: Array<{ event: NormalizedPullRequestEvent; riskLevel: string }> = [];
+    await jobStore.create(event, 3);
+
+    const processor = new ReviewJobProcessor({
+      eventStore,
+      jobStore,
+      pullRequestFileClient: {
+        fetchPullRequestDiff: async () => ({
+          files: [{ path: "src/review.ts", patch: "+ console.log('debug');" }],
+        }),
+      },
+      pullRequestReviewCommentClient: {
+        publishReviewSummaryComment: async (reviewEvent, review) => {
+          published.push({ event: reviewEvent, riskLevel: review.riskLevel });
+          return { commentId: 1001, action: "created" };
+        },
+      },
+      maxAttempts: 3,
+    });
+
+    const result = await processor.process({ event }, 1);
+
+    expect(result.status).toBe("completed");
+    expect(published).toEqual([{ event, riskLevel: "medium" }]);
+    await expect(eventStore.get("delivery-comment")).resolves.toBeDefined();
+  });
+
+  it("marks comment publishing failures as retryable worker failures", async () => {
+    const eventStore = new InMemoryReviewEventStore();
+    const jobStore = new InMemoryReviewJobStore();
+    const event = normalizedEvent("delivery-comment-fail");
+    await jobStore.create(event, 3);
+
+    const processor = new ReviewJobProcessor({
+      eventStore,
+      jobStore,
+      pullRequestReviewCommentClient: {
+        publishReviewSummaryComment: async () => {
+          throw new Error("comment write denied");
+        },
+      },
+      maxAttempts: 3,
+    });
+
+    await expect(processor.process({ event }, 1)).rejects.toThrow("comment write denied");
+    await expect(jobStore.get("delivery-comment-fail")).resolves.toMatchObject({
+      status: "failed",
+      attempts: 1,
+      lastError: "comment write denied",
+    });
+    await expect(eventStore.get("delivery-comment-fail")).resolves.toBeDefined();
+  });
 });
 
 class FailingReviewer extends DeterministicReviewer {

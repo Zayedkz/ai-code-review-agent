@@ -88,4 +88,97 @@ describe("GitHubPullRequestFileClient", () => {
       "GitHub file retrieval failed with status 403",
     );
   });
+
+  it("creates a managed review summary comment when none exists for the delivery and head SHA", async () => {
+    const calls: Array<{ input: string | URL | Request; init?: RequestInit }> = [];
+    const fetchImpl: typeof fetch = async (input, init) => {
+      calls.push({ input, init });
+      if (String(input).endsWith("/issues/12/comments?per_page=100&page=1")) {
+        return new Response(JSON.stringify([]), { status: 200 });
+      }
+      return new Response(JSON.stringify({ id: 456 }), { status: 201 });
+    };
+
+    const result = await new GitHubPullRequestFileClient({
+      apiBaseUrl: "https://api.github.test",
+      installationTokenProvider: {
+        getInstallationToken: async () => "installation-token",
+      },
+      fetchImpl,
+    }).publishReviewSummaryComment(event, {
+      provider: "deterministic",
+      riskLevel: "medium",
+      summary: "Zayedkz/example#12 reviewed with 1 finding(s).",
+      findings: [
+        {
+          code: "missing-test-change",
+          severity: "warning",
+          message: "No test files were changed in this pull request.",
+          recommendation: "Add or update tests.",
+          locations: [{ path: "src/review.ts" }],
+        },
+      ],
+    });
+
+    expect(result).toEqual({ commentId: 456, action: "created" });
+    expect(calls.map((call) => String(call.input))).toEqual([
+      "https://api.github.test/repos/Zayedkz/example/issues/12/comments?per_page=100&page=1",
+      "https://api.github.test/repos/Zayedkz/example/issues/12/comments",
+    ]);
+    expect(calls[1]?.init?.method).toBe("POST");
+    expect(calls[1]?.init?.headers).toMatchObject({
+      authorization: "Bearer installation-token",
+      "content-type": "application/json",
+    });
+    expect(String(calls[1]?.init?.body)).toContain(
+      "<!-- ai-code-review-agent:delivery=delivery-1;head=abc -->",
+    );
+    expect(String(calls[1]?.init?.body)).toContain("missing-test-change");
+    expect(String(calls[1]?.init?.body)).toContain("src/review.ts");
+  });
+
+  it("updates the managed review summary comment for the same delivery and head SHA", async () => {
+    const calls: Array<{ input: string | URL | Request; init?: RequestInit }> = [];
+    const fetchImpl: typeof fetch = async (input, init) => {
+      calls.push({ input, init });
+      if (String(input).endsWith("/issues/12/comments?per_page=100&page=1")) {
+        return new Response(
+          JSON.stringify([
+            { id: 100, body: "unrelated comment" },
+            { id: 101, body: "<!-- ai-code-review-agent:delivery=delivery-1;head=abc -->\nold body" },
+          ]),
+          { status: 200 },
+        );
+      }
+      return new Response(JSON.stringify({ id: 101 }), { status: 200 });
+    };
+
+    const result = await new GitHubPullRequestFileClient({
+      apiBaseUrl: "https://api.github.test",
+      fetchImpl,
+    }).publishReviewSummaryComment(event, {
+      provider: "deterministic",
+      riskLevel: "low",
+      summary: "Zayedkz/example#12 reviewed with 0 finding(s).",
+      findings: [],
+    });
+
+    expect(result).toEqual({ commentId: 101, action: "updated" });
+    expect(String(calls[1]?.input)).toBe("https://api.github.test/repos/Zayedkz/example/issues/comments/101");
+    expect(calls[1]?.init?.method).toBe("PATCH");
+    expect(String(calls[1]?.init?.body)).toContain("- No findings.");
+  });
+
+  it("throws when review comment lookup fails", async () => {
+    const fetchImpl: typeof fetch = async () => new Response("forbidden", { status: 403 });
+
+    await expect(
+      new GitHubPullRequestFileClient({ fetchImpl }).publishReviewSummaryComment(event, {
+        provider: "deterministic",
+        riskLevel: "low",
+        summary: "reviewed",
+        findings: [],
+      }),
+    ).rejects.toThrow("GitHub review comment lookup failed with status 403");
+  });
 });

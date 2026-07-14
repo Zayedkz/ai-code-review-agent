@@ -29,6 +29,11 @@ describe("review provider selection", () => {
     expect(loadSettings({}).llmProvider).toBe("deterministic");
   });
 
+  it("keeps PR comment publishing opt-in", () => {
+    expect(loadSettings({}).publishReviewComments).toBe(false);
+    expect(loadSettings({ PUBLISH_REVIEW_COMMENTS: "true" }).publishReviewComments).toBe(true);
+  });
+
   it("selects a mock local provider without external API calls", async () => {
     const provider = createReviewProvider("mock");
     const review = await provider.review(event, {
